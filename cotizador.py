@@ -100,6 +100,12 @@ T = {
         "use_row": "Usar como base ↓",
         "form_header": "Datos de la cotización",
         "customer": "Cliente", "product": "Producto *", "code": "Código / ENR", "uom": "UOM",
+        "product_pick": "Producto (elige o escribe para filtrar) *",
+        "code_pick": "Código / ENR (elige o filtra)",
+        "write_new": "✏️ Escribir nuevo…",
+        "product_new": "Nuevo producto *",
+        "code_new": "Nuevo código / ENR",
+        "autofill_hint": "💡 Elige un producto del histórico para autocompletar su última base (costo, GM, forex…).",
         "cost": "Costo (CAD/kg) *", "ovrhd": "Overhead", "gm": "GM (0.30 = 30%)",
         "comm": "Comisión", "duty": "Duty / Arancel", "forex": "Forex CAD→USD",
         "spec": "Especificación", "incoterm": "Incoterm", "moq": "MOQ", "validity": "Validez",
@@ -187,6 +193,12 @@ T = {
         "use_row": "Use as base ↓",
         "form_header": "Quote details",
         "customer": "Customer", "product": "Product *", "code": "Code / ENR", "uom": "UOM",
+        "product_pick": "Product (pick or type to filter) *",
+        "code_pick": "Code / ENR (pick or filter)",
+        "write_new": "✏️ Type new…",
+        "product_new": "New product *",
+        "code_new": "New code / ENR",
+        "autofill_hint": "💡 Pick a product from history to autofill its last base (cost, GM, forex…).",
         "cost": "Cost (CAD/kg) *", "ovrhd": "Overhead", "gm": "GM (0.30 = 30%)",
         "comm": "Commission", "duty": "Duty / Tariff", "forex": "Forex CAD→USD",
         "spec": "Specification", "incoterm": "Incoterm", "moq": "MOQ", "validity": "Validity",
@@ -538,22 +550,83 @@ with tab_quote:
 
     with left:
         st.subheader(t["form_header"])
+
+        # Listas de productos/códigos del histórico (para el desplegable filtrable)
+        prod_options = []
+        code_options = []
+        if hist is not None and len(hist):
+            prod_options = sorted([p for p in hist["product"].dropna().unique() if str(p).strip()])
+            code_options = sorted([c for c in hist["code"].dropna().unique() if str(c).strip()])
+
+        NEW = t["write_new"]
+
         r1c1, r1c2 = st.columns(2)
         customer = r1c1.text_input(t["customer"], value=b.get("customer", ""))
-        product = r1c2.text_input(t["product"], value=b.get("product", ""))
+
+        # --- Selector híbrido de PRODUCTO ---
+        with r1c2:
+            if prod_options:
+                # Preseleccionar el producto si viene de "usar como base"; si no, opción de escribir nuevo
+                base_prod = b.get("product", "")
+                opts = [NEW] + prod_options
+                idx = opts.index(base_prod) if base_prod in prod_options else 0
+                pick = st.selectbox(t["product_pick"], opts, index=idx,
+                                    key="prod_pick",
+                                    help=t["autofill_hint"])
+                if pick == NEW:
+                    product = st.text_input(t["product_new"], value=base_prod if base_prod not in prod_options else "",
+                                            key="prod_new")
+                else:
+                    product = pick
+            else:
+                # Sin histórico: campo de texto simple
+                product = st.text_input(t["product"], value=b.get("product", ""))
+
+        # Autocompletar base desde la última cotización de ese producto (solo si se eligió del histórico)
+        if hist is not None and len(hist) and product and product in prod_options:
+            last = hist[hist["product"] == product].sort_values("date", ascending=False).iloc[0]
+            auto = {
+                "code": str(last["code"]) if str(last["code"]).strip() else b.get("code", ""),
+                "matl": float(last["matl"]) if pd.notna(last["matl"]) else 0.0,
+                "ovrhd": float(last["ovrhd"]) if pd.notna(last["ovrhd"]) else 2.0,
+                "gm": float(last["gm"]) if pd.notna(last["gm"]) else 0.30,
+                "comm": float(last["comm"]) if pd.notna(last["comm"]) else 0.0,
+                "duty": float(last["duty"]) if pd.notna(last["duty"]) else 0.0,
+                "forex": float(last["forex"]) if pd.notna(last["forex"]) else 1.37,
+                "uom": str(last["uom"]) if str(last["uom"]).strip() else "kg",
+            }
+        else:
+            auto = {}
+
         r2c1, r2c2 = st.columns(2)
-        code = r2c1.text_input(t["code"], value=b.get("code", ""))
-        uom = r2c2.text_input(t["uom"], value=b.get("uom", "kg"))
+
+        # --- Selector híbrido de CÓDIGO ---
+        with r2c1:
+            default_code = auto.get("code", b.get("code", ""))
+            if code_options:
+                opts_c = [NEW] + code_options
+                idx_c = opts_c.index(default_code) if default_code in code_options else 0
+                pick_c = st.selectbox(t["code_pick"], opts_c, index=idx_c, key="code_pick")
+                if pick_c == NEW:
+                    code = st.text_input(t["code_new"],
+                                         value=default_code if default_code not in code_options else "",
+                                         key="code_new")
+                else:
+                    code = pick_c
+            else:
+                code = st.text_input(t["code"], value=default_code)
+
+        uom = r2c2.text_input(t["uom"], value=auto.get("uom", b.get("uom", "kg")))
 
         st.markdown("---")
         m1, m2, m3 = st.columns(3)
-        matl = m1.number_input(t["cost"], min_value=0.0, value=float(b.get("matl", 0.0)), step=0.01, format="%.2f")
-        ovrhd = m2.number_input(t["ovrhd"], min_value=0.0, value=float(b.get("ovrhd", 2.0)), step=0.5, format="%.2f")
-        gm = m3.number_input(t["gm"], min_value=0.0, max_value=0.99, value=float(b.get("gm", 0.30)), step=0.05, format="%.2f")
+        matl = m1.number_input(t["cost"], min_value=0.0, value=float(auto.get("matl", b.get("matl", 0.0))), step=0.01, format="%.2f")
+        ovrhd = m2.number_input(t["ovrhd"], min_value=0.0, value=float(auto.get("ovrhd", b.get("ovrhd", 2.0))), step=0.5, format="%.2f")
+        gm = m3.number_input(t["gm"], min_value=0.0, max_value=0.99, value=float(auto.get("gm", b.get("gm", 0.30))), step=0.05, format="%.2f")
         m4, m5, m6 = st.columns(3)
-        comm = m4.number_input(t["comm"], min_value=0.0, max_value=0.99, value=float(b.get("comm", 0.0)), step=0.01, format="%.2f")
-        duty = m5.number_input(t["duty"], min_value=0.0, max_value=0.99, value=float(b.get("duty", 0.0)), step=0.01, format="%.2f")
-        forex = m6.number_input(t["forex"], min_value=0.0001, value=float(b.get("forex", 1.37)), step=0.001, format="%.3f")
+        comm = m4.number_input(t["comm"], min_value=0.0, max_value=0.99, value=float(auto.get("comm", b.get("comm", 0.0))), step=0.01, format="%.2f")
+        duty = m5.number_input(t["duty"], min_value=0.0, max_value=0.99, value=float(auto.get("duty", b.get("duty", 0.0))), step=0.01, format="%.2f")
+        forex = m6.number_input(t["forex"], min_value=0.0001, value=float(auto.get("forex", b.get("forex", 1.37))), step=0.001, format="%.3f")
 
         st.markdown("---")
         s1, s2, s3, s4 = st.columns(4)
