@@ -18,6 +18,7 @@ Fórmula de precio (verificada):
 
 import io
 import os
+import re
 import shutil
 from datetime import date, datetime
 
@@ -106,6 +107,24 @@ T = {
         "product_new": "Nuevo producto *",
         "code_new": "Nuevo código / ENR",
         "autofill_hint": "💡 Elige un producto del histórico para autocompletar su última base (costo, GM, forex…).",
+        "customer_pick": "Cliente (elige o escribe para filtrar)",
+        "customer_new": "Nuevo cliente",
+        "code_family": "🔗 Códigos ligados a «{p}»",
+        "final_price": "PRECIO FINAL A COTIZAR",
+        "final_price_label": "Precio final (USD) — decisión del vendedor",
+        "final_price_help": "El cotizador sugiere un precio, pero tú decides. Este es el valor que se guarda en la cotización.",
+        "suggested": "Sugerido: ${s}",
+        "final_vs_calc": "{arrow} {d} vs. sugerido",
+        "grp_client": "── Productos de {c} ──",
+        "grp_catalog": "── Resto del catálogo ──",
+        "client_base": "🎯 Base de {c} (última vez): {info}",
+        "client_never": "ℹ️ {c} nunca compró «{p}» — usando base general del producto.",
+        "client_last_price": "💰 {c} pagó ${p} la última vez ({date})",
+        "customer_pick": "Cliente (elige o escribe para filtrar)",
+        "customer_new": "Nuevo cliente",
+        "code_filtered_hint": "Códigos de este producto",
+        "code_all_hint": "Todos los códigos",
+        "from_code_hint": "↑ Producto tomado del código elegido",
         "cost": "Costo (CAD/kg) *", "ovrhd": "Overhead", "gm": "GM (0.30 = 30%)",
         "comm": "Comisión", "duty": "Duty / Arancel", "forex": "Forex CAD→USD",
         "spec": "Especificación", "incoterm": "Incoterm", "moq": "MOQ", "validity": "Validez",
@@ -199,6 +218,24 @@ T = {
         "product_new": "New product *",
         "code_new": "New code / ENR",
         "autofill_hint": "💡 Pick a product from history to autofill its last base (cost, GM, forex…).",
+        "customer_pick": "Customer (pick or type to filter)",
+        "customer_new": "New customer",
+        "code_family": "🔗 Codes linked to «{p}»",
+        "final_price": "FINAL PRICE TO QUOTE",
+        "final_price_label": "Final price (USD) — seller's decision",
+        "final_price_help": "The tool suggests a price, but you decide. This is the value saved in the quote.",
+        "suggested": "Suggested: ${s}",
+        "final_vs_calc": "{arrow} {d} vs. suggested",
+        "grp_client": "── {c}'s products ──",
+        "grp_catalog": "── Rest of catalog ──",
+        "client_base": "🎯 {c}'s base (last time): {info}",
+        "client_never": "ℹ️ {c} never bought «{p}» — using general product base.",
+        "client_last_price": "💰 {c} paid ${p} last time ({date})",
+        "customer_pick": "Customer (pick or type to filter)",
+        "customer_new": "New customer",
+        "code_filtered_hint": "Codes for this product",
+        "code_all_hint": "All codes",
+        "from_code_hint": "↑ Product taken from the selected code",
         "cost": "Cost (CAD/kg) *", "ovrhd": "Overhead", "gm": "GM (0.30 = 30%)",
         "comm": "Commission", "duty": "Duty / Tariff", "forex": "Forex CAD→USD",
         "spec": "Specification", "incoterm": "Incoterm", "moq": "MOQ", "validity": "Validity",
@@ -270,12 +307,52 @@ COLS = ["date", "customer", "broker", "product", "code", "matl", "ovrhd",
 NUMERIC = ["matl", "ovrhd", "gm", "comm", "duty", "forex", "quote"]
 
 
+def normalize_code(code):
+    """Normaliza un código a formato NR/ENR.
+    - Números puros -> se antepone NR (11064 -> NR11064).
+    - Empieza con nr/enr (cualquier caja) -> se pasa a NR/ENR en mayúscula.
+    - Formatos raros (X, ????, 08xxx, t1062...) -> se dejan intactos.
+    """
+    if code is None:
+        return ""
+    c = str(code).strip()
+    if not c:
+        return ""
+    up = c.upper()
+    if up.startswith("ENR"):
+        return "ENR" + c[3:]
+    if up.startswith("NR"):
+        return "NR" + c[2:]
+    if re.match(r"^\d+$", c):
+        return "NR" + c
+    return c
+
+
 def calc_quote(matl, ovrhd, gm, comm, duty, forex):
     """USD = (matl + ovrhd) / (1-GM) / (1-comm) / (1-duty) / forex."""
     fx = forex or 1.0
     if gm >= 1 or comm >= 1 or duty >= 1:
         return float("nan")
     return (matl + ovrhd) / (1 - gm) / (1 - comm) / (1 - duty) / fx
+
+
+def normalize_code(code):
+    """Normaliza códigos a NR/ENR. Números puros -> NR<num>. 'enr'/'nr' -> mayúscula.
+    Códigos raros no numéricos (X, ????, 08xxx, t1062...) se dejan intactos."""
+    import re as _re
+    if code is None:
+        return ""
+    s = str(code).strip()
+    if not s:
+        return ""
+    up = s.upper()
+    if up.startswith("ENR"):
+        return "ENR" + s[3:]
+    if up.startswith("NR"):
+        return "NR" + s[2:]
+    if _re.fullmatch(r"\d+", s):
+        return "NR" + s
+    return s
 
 
 def normalize_history(df):
@@ -291,6 +368,7 @@ def normalize_history(df):
     for c in ["date", "customer", "broker", "product", "code", "uom", "comment"]:
         df[c] = df[c].fillna("").astype(str)
     df["uom"] = df["uom"].replace("", "kg")
+    df["code"] = df["code"].apply(normalize_code)  # normaliza códigos a NR/ENR
     return df
 
 
@@ -551,70 +629,169 @@ with tab_quote:
     with left:
         st.subheader(t["form_header"])
 
-        # Listas de productos/códigos del histórico (para el desplegable filtrable)
+        # Construir el mapa producto <-> códigos desde el histórico (case-insensitive).
+        # Cada producto (por su nombre "canónico" tal como aparece más reciente) tiene
+        # su familia de códigos; y cada código apunta a su producto.
         prod_options = []
         code_options = []
+        prod_to_codes = {}      # nombre_producto -> [códigos de esa familia]
+        code_to_prod = {}       # código -> nombre_producto
+        prod_canonical = {}     # lower(nombre) -> nombre canónico (última grafía usada)
+
         if hist is not None and len(hist):
-            prod_options = sorted([p for p in hist["product"].dropna().unique() if str(p).strip()])
-            code_options = sorted([c for c in hist["code"].dropna().unique() if str(c).strip()])
+            h2 = hist.copy()
+            h2 = h2[h2["product"].astype(str).str.strip() != ""]
+            # nombre canónico = la grafía más reciente de cada producto (case-insensitive)
+            h2_sorted = h2.sort_values("date")
+            for _, row in h2_sorted.iterrows():
+                pl = str(row["product"]).strip().lower()
+                prod_canonical[pl] = str(row["product"]).strip()  # se queda con la última
+            prod_options = sorted(prod_canonical.values(), key=lambda x: x.lower())
+
+            # familias de códigos por producto (case-insensitive en el nombre)
+            for _, row in h2.iterrows():
+                pl = str(row["product"]).strip().lower()
+                canon = prod_canonical.get(pl, str(row["product"]).strip())
+                cd = str(row["code"]).strip()
+                if cd:
+                    prod_to_codes.setdefault(canon, [])
+                    if cd not in prod_to_codes[canon]:
+                        prod_to_codes[canon].append(cd)
+                    # código -> producto (si un código se repartiera entre productos, gana el más reciente)
+                    code_to_prod[cd] = canon
+            code_options = sorted(code_to_prod.keys(), key=lambda x: x.lower())
 
         NEW = t["write_new"]
 
-        r1c1, r1c2 = st.columns(2)
-        customer = r1c1.text_input(t["customer"], value=b.get("customer", ""))
+        # --- Cliente: desplegable híbrido ---
+        cust_options = []
+        if hist is not None and len(hist):
+            cust_options = sorted([c for c in hist["customer"].dropna().unique() if str(c).strip()],
+                                  key=lambda x: x.lower())
 
-        # --- Selector híbrido de PRODUCTO ---
+        r1c1, r1c2 = st.columns(2)
+        with r1c1:
+            if cust_options:
+                base_cust = b.get("customer", "")
+                copts = [NEW] + cust_options
+                cidx = copts.index(base_cust) if base_cust in cust_options else 0
+                cpick = st.selectbox(t["customer_pick"], copts, index=cidx, key="cust_pick")
+                if cpick == NEW:
+                    customer = st.text_input(t["customer_new"],
+                                             value=base_cust if base_cust not in cust_options else "",
+                                             key="cust_new")
+                else:
+                    customer = cpick
+            else:
+                customer = st.text_input(t["customer"], value=b.get("customer", ""))
+
+        # --- Producto: desplegable híbrido, AGRUPADO por cliente ---
+        # Si hay un cliente elegido, sus productos aparecen primero (bajo un separador),
+        # y debajo el resto del catálogo. Los separadores no son seleccionables.
+        prev_code_choice = st.session_state.get("code_pick", None)
+        prod_from_code = code_to_prod.get(prev_code_choice) if prev_code_choice and prev_code_choice != NEW else None
+
+        # Productos que este cliente ya compró (case-insensitive)
+        client_prods = []
+        if hist is not None and len(hist) and customer and customer.strip():
+            cmask = hist["customer"].str.strip().str.lower() == customer.strip().lower()
+            client_prods = sorted(
+                {prod_canonical.get(str(p).strip().lower(), str(p).strip())
+                 for p in hist[cmask]["product"] if str(p).strip()},
+                key=lambda x: x.lower())
+
+        GRP_C = t["grp_client"].format(c=customer.strip()[:24]) if customer.strip() else ""
+        GRP_CAT = t["grp_catalog"]
+
         with r1c2:
             if prod_options:
-                # Preseleccionar el producto si viene de "usar como base"; si no, opción de escribir nuevo
-                base_prod = b.get("product", "")
-                opts = [NEW] + prod_options
-                idx = opts.index(base_prod) if base_prod in prod_options else 0
+                if client_prods:
+                    rest = [p for p in prod_options if p not in client_prods]
+                    opts = [NEW, GRP_C] + client_prods + [GRP_CAT] + rest
+                else:
+                    opts = [NEW] + prod_options
+
+                base_prod = prod_from_code or b.get("product", "")
+                idx = opts.index(base_prod) if base_prod in opts else 0
                 pick = st.selectbox(t["product_pick"], opts, index=idx,
-                                    key="prod_pick",
-                                    help=t["autofill_hint"])
-                if pick == NEW:
-                    product = st.text_input(t["product_new"], value=base_prod if base_prod not in prod_options else "",
+                                    key="prod_pick", help=t["autofill_hint"])
+                if pick in (GRP_C, GRP_CAT):
+                    product = ""   # separador: no es selección válida
+                elif pick == NEW:
+                    product = st.text_input(t["product_new"],
+                                            value=base_prod if base_prod not in prod_options else "",
                                             key="prod_new")
                 else:
                     product = pick
             else:
-                # Sin histórico: campo de texto simple
                 product = st.text_input(t["product"], value=b.get("product", ""))
 
-        # Autocompletar base desde la última cotización de ese producto (solo si se eligió del histórico)
-        if hist is not None and len(hist) and product and product in prod_options:
-            last = hist[hist["product"] == product].sort_values("date", ascending=False).iloc[0]
-            auto = {
-                "code": str(last["code"]) if str(last["code"]).strip() else b.get("code", ""),
-                "matl": float(last["matl"]) if pd.notna(last["matl"]) else 0.0,
-                "ovrhd": float(last["ovrhd"]) if pd.notna(last["ovrhd"]) else 2.0,
-                "gm": float(last["gm"]) if pd.notna(last["gm"]) else 0.30,
-                "comm": float(last["comm"]) if pd.notna(last["comm"]) else 0.0,
-                "duty": float(last["duty"]) if pd.notna(last["duty"]) else 0.0,
-                "forex": float(last["forex"]) if pd.notna(last["forex"]) else 1.37,
-                "uom": str(last["uom"]) if str(last["uom"]).strip() else "kg",
-            }
-        else:
-            auto = {}
+        # Autocompletar base: PRIORIDAD a la última cotización de ESTE cliente para el producto;
+        # si el cliente nunca lo compró, cae a la base general del producto.
+        auto = {}
+        client_last = None
+        if hist is not None and len(hist) and product:
+            prod_mask = hist["product"].str.strip().str.lower() == product.strip().lower()
+            fam = hist[prod_mask]
+            if customer and customer.strip():
+                fam_client = fam[fam["customer"].str.strip().str.lower() == customer.strip().lower()]
+                if len(fam_client):
+                    client_last = fam_client.sort_values("date", ascending=False).iloc[0]
+            source_row = client_last if client_last is not None else (
+                fam.sort_values("date", ascending=False).iloc[0] if len(fam) else None)
+            if source_row is not None:
+                last = source_row
+                auto = {
+                    "code": str(last["code"]) if str(last["code"]).strip() else "",
+                    "matl": float(last["matl"]) if pd.notna(last["matl"]) else 0.0,
+                    "ovrhd": float(last["ovrhd"]) if pd.notna(last["ovrhd"]) else 2.0,
+                    "gm": float(last["gm"]) if pd.notna(last["gm"]) else 0.30,
+                    "comm": float(last["comm"]) if pd.notna(last["comm"]) else 0.0,
+                    "duty": float(last["duty"]) if pd.notna(last["duty"]) else 0.0,
+                    "forex": float(last["forex"]) if pd.notna(last["forex"]) else 1.37,
+                    "uom": str(last["uom"]) if str(last["uom"]).strip() else "kg",
+                }
+
+        # Aviso de qué base se está usando (la del cliente, o la general)
+        if product and customer and customer.strip():
+            if client_last is not None:
+                st.caption(t["client_last_price"].format(
+                    c=customer.strip()[:20], p=fmt(client_last["quote"]), date=client_last["date"]))
+            elif auto:
+                st.caption(t["client_never"].format(c=customer.strip()[:20], p=product[:24]))
 
         r2c1, r2c2 = st.columns(2)
 
-        # --- Selector híbrido de CÓDIGO ---
+        # --- Código: desplegable híbrido LIGADO al producto ---
+        # Si hay producto elegido, la lista de códigos se limita a su familia.
         with r2c1:
+            if product and product in prod_to_codes:
+                family_codes = prod_to_codes[product]
+            elif product and product.strip().lower() in {p.lower() for p in prod_to_codes}:
+                # match case-insensitive
+                key = next(p for p in prod_to_codes if p.lower() == product.strip().lower())
+                family_codes = prod_to_codes[key]
+            else:
+                family_codes = code_options  # sin producto: todos
+
             default_code = auto.get("code", b.get("code", ""))
-            if code_options:
-                opts_c = [NEW] + code_options
-                idx_c = opts_c.index(default_code) if default_code in code_options else 0
+            if family_codes:
+                opts_c = [NEW] + family_codes
+                idx_c = opts_c.index(default_code) if default_code in family_codes else (1 if len(family_codes) == 1 else 0)
                 pick_c = st.selectbox(t["code_pick"], opts_c, index=idx_c, key="code_pick")
                 if pick_c == NEW:
                     code = st.text_input(t["code_new"],
-                                         value=default_code if default_code not in code_options else "",
+                                         value=default_code if default_code not in family_codes else "",
                                          key="code_new")
                 else:
                     code = pick_c
             else:
                 code = st.text_input(t["code"], value=default_code)
+
+        # Normalizar el código a NR/ENR para mostrar y guardar
+        code = normalize_code(code)
+        if code and family_codes and product:
+            st.caption(t["code_family"].format(n=len([c for c in family_codes]), p=product))
 
         uom = r2c2.text_input(t["uom"], value=auto.get("uom", b.get("uom", "kg")))
 
@@ -656,6 +833,25 @@ with tab_quote:
             st.markdown("###### ⛓️ " + ("Desglose" if st.session_state.lang == "es" else "Breakdown"))
             for label, val in steps:
                 st.markdown(f"<div style='display:flex;justify-content:space-between;font-size:12.5px;padding:2px 0;'><span style='color:#93A3B8'>{label}</span><span style='color:#EDF1F7;font-family:monospace'>{fmt(val)}</span></div>", unsafe_allow_html=True)
+
+        # --- PRECIO FINAL A COTIZAR (decisión del vendedor) ---
+        st.markdown("---")
+        st.markdown(f'<div style="color:{GOLD_HI};font-size:11px;letter-spacing:.14em;font-weight:700">{t["final_price"]}</div>', unsafe_allow_html=True)
+        suggested = 0.0 if pd.isna(price) else round(float(price), 2)
+        final_price = st.number_input(
+            t["final_price_label"], min_value=0.0,
+            value=suggested, step=0.01, format="%.2f",
+            help=t["final_price_help"], key="final_price_input",
+        )
+        if suggested > 0:
+            st.caption(t["suggested"].format(s=fmt(suggested)))
+            if abs(final_price - suggested) > 0.005:
+                arrow = "↑" if final_price > suggested else "↓"
+                diff_pct = abs(final_price - suggested) / suggested * 100 if suggested else 0
+                st.markdown(
+                    f"<div style='color:{TURMERIC};font-size:12px'>"
+                    + t["final_vs_calc"].format(arrow=arrow, d=f"{diff_pct:.1f}%")
+                    + "</div>", unsafe_allow_html=True)
 
         # --- Referencia histórica ---
         st.markdown("---")
@@ -699,22 +895,25 @@ with tab_quote:
 
         st.markdown("---")
         if st.button(t["add_quote"], type="primary", use_container_width=True):
-            if not product.strip() or matl <= 0 or pd.isna(price):
+            # El precio a guardar es el FINAL (decisión del vendedor), no el calculado.
+            price_to_save = final_price if final_price and final_price > 0 else (0.0 if pd.isna(price) else price)
+            if not product.strip() or price_to_save <= 0:
                 st.error(t["missing"])
             else:
                 st.session_state.cart.append({
                     "date": date.today().isoformat(),
                     "customer": customer.strip(), "product": product.strip(),
-                    "code": code.strip(), "spec": spec.strip(),
+                    "code": normalize_code(code), "spec": spec.strip(),
                     "matl": round(matl, 4), "ovrhd": round(ovrhd, 4),
                     "gm": round(gm, 4), "comm": round(comm, 4), "duty": round(duty, 4),
                     "forex": round(forex, 4), "uom": uom or "kg",
-                    "price_usd": round(price, 2),
+                    "price_usd": round(price_to_save, 2),
+                    "price_suggested": (None if pd.isna(price) else round(float(price), 2)),
                     "incoterm": incoterm.strip(), "moq": moq.strip(),
                     "validity": validity.strip(), "comment": comment.strip(),
                 })
                 st.session_state.base_row = {}
-                st.success(t["added_ok"].format(p=product.strip(), q=fmt(price)))
+                st.success(t["added_ok"].format(p=product.strip(), q=fmt(price_to_save)))
 
 # ============================================================================
 # TAB 3 — Cotización al cliente (export en lote)
