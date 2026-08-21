@@ -1,0 +1,4 @@
+date,customer,broker,product,code,matl,ovrhd,gm,comm,duty,forex,uom,quote,comment
+2025-01-15,EjemploCliente,,Ginger Oleoresin,NR0101,45.00,2.0,0.30,0.05,,1.37,kg,50.72,fila de ejemplo — reemplazar
+2025-02-20,EjemploCliente,,Paprika Oleoresin,NR0202,38.50,2.0,0.28,0.00,,1.37,kg,41.06,fila de ejemplo — reemplazar
+2025-03-10,OtroCliente,,Turmeric Extract,NR0303,62.00,2.0,0.32,0.05,0.03,1.36,kg,74.11,fila de ejemplo — reemplazar

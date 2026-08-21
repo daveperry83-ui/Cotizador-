@@ -1,0 +1,30 @@
+# ============================================================
+#  NUNCA subir datos comerciales reales al repositorio.
+#  El histórico se carga en cada sesión de forma efímera.
+# ============================================================
+
+# Datos reales (costos, márgenes, clientes) — jamás versionar
+data/*.csv
+data/*.xlsx
+data/*.xls
+!data/plantilla_historico.csv          # excepción: la plantilla vacía/estructura sí puede vivir aquí
+*.real.csv
+*_confidencial*
+*_internal*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
