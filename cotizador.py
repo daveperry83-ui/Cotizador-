@@ -125,6 +125,14 @@ T = {
         "export_internal": "⬇️ Exportar interno (con costos y márgenes)",
         "export_client": "⬇️ Exportar para cliente (sin costos)",
         "export_client_help": "Versión limpia: solo ítem, especificación, precio, moneda, incoterm, validez y MOQ. Sin costos ni márgenes.",
+        "update_header": "Actualizar histórico (modo nube)",
+        "update_desc": "Descarga tu histórico completo con las cotizaciones de esta sesión ya agregadas. Reemplaza tu archivo con este y súbelo la próxima vez.",
+        "update_btn_csv": "⬇️ Descargar histórico actualizado (CSV)",
+        "update_btn_xlsx": "⬇️ Descargar histórico actualizado (Excel)",
+        "update_summary": "{base} previas + {new} de esta sesión = {total} registros",
+        "update_dups_note": "({d} duplicadas se omitieron)",
+        "update_no_hist": "Carga primero un histórico para poder combinarlo con la sesión.",
+        "update_no_cart": "No hay cotizaciones nuevas en la sesión. El histórico se descarga tal cual está.",
         "client_meta": "Datos de la cotización al cliente",
         "client_name": "Cliente", "client_ref": "Referencia / RFQ", "client_currency": "Moneda",
         "client_prepared": "Preparado por",
@@ -204,6 +212,14 @@ T = {
         "export_internal": "⬇️ Export internal (with costs & margins)",
         "export_client": "⬇️ Export for client (no costs)",
         "export_client_help": "Clean version: only item, spec, price, currency, incoterm, validity, MOQ. No costs or margins.",
+        "update_header": "Update history (cloud mode)",
+        "update_desc": "Download your full history with this session's quotes already appended. Replace your file with this one and upload it next time.",
+        "update_btn_csv": "⬇️ Download updated history (CSV)",
+        "update_btn_xlsx": "⬇️ Download updated history (Excel)",
+        "update_summary": "{base} previous + {new} from this session = {total} records",
+        "update_dups_note": "({d} duplicates skipped)",
+        "update_no_hist": "Load a history first so it can be merged with the session.",
+        "update_no_cart": "No new session quotes. History downloads as-is.",
         "client_meta": "Client quotation details",
         "client_name": "Customer", "client_ref": "Reference / RFQ", "client_currency": "Currency",
         "client_prepared": "Prepared by",
@@ -702,8 +718,50 @@ with tab_batch:
         )
         st.caption("🔒 " + t["export_client_help"])
 
-# ============================================================================
-# TAB 4 — Analítica
+        # ------------------------------------------------------------------
+        # Actualizar histórico (modo nube): descargar CSV/Excel completo
+        # con las cotizaciones de la sesión ya agregadas y deduplicadas.
+        # ------------------------------------------------------------------
+        st.markdown("---")
+        st.markdown(f"##### 🔄 {t['update_header']}")
+        st.caption(t["update_desc"])
+
+        if st.session_state.history is None or not len(st.session_state.history):
+            st.info(t["update_no_hist"])
+        else:
+            new_rows = cart_to_rows(st.session_state.cart)
+            combined, n_added = append_dedup(st.session_state.history, new_rows)
+            n_base = len(st.session_state.history)
+            n_dups = (len(new_rows) - n_added) if new_rows is not None else 0
+
+            summary = t["update_summary"].format(base=n_base, new=n_added, total=len(combined))
+            if n_dups:
+                summary += " " + t["update_dups_note"].format(d=n_dups)
+            st.markdown(f"<div style='color:{GOLD_HI};font-size:13px;margin-bottom:8px'>📊 {summary}</div>",
+                        unsafe_allow_html=True)
+            if not st.session_state.cart:
+                st.caption(t["update_no_cart"])
+
+            u1, u2 = st.columns(2)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+            # CSV
+            csv_bytes = combined.to_csv(index=False).encode("utf-8-sig")
+            u1.download_button(
+                t["update_btn_csv"], data=csv_bytes,
+                file_name=f"historico_actualizado_{stamp}.csv",
+                mime="text/csv", use_container_width=True,
+            )
+            # Excel
+            buf_hist = io.BytesIO()
+            with pd.ExcelWriter(buf_hist, engine="openpyxl") as xw:
+                combined.to_excel(xw, sheet_name="Historico", index=False)
+            u2.download_button(
+                t["update_btn_xlsx"], data=buf_hist.getvalue(),
+                file_name=f"historico_actualizado_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 # ============================================================================
 with tab_insights:
     st.subheader(t["insights_header"])
