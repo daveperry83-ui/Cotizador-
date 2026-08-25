@@ -166,6 +166,27 @@ T = {
         "ins_by_customer": "GM promedio por cliente (top 15)",
         "ins_top_products": "Productos más cotizados (top 15)",
         "ins_over_time": "Cotizaciones por mes",
+        # --- precarga desde búsqueda ---
+        "use_in_quote": "📋 Usar en nueva cotización",
+        "preloaded_ok": "✓ «{p}» precargado — ve a la pestaña «Nueva cotización» para ajustar y cotizar.",
+        "sel_to_preload": "Selecciona la fila a precargar",
+        "row_label": "{date} · {cust} · {prod} · ${q}",
+        # --- analytics de producto / ventas ---
+        "ins_product_header": "📊 Analítica de «{p}»",
+        "ins_source_quotes": "📊 Fuente: cotizaciones históricas",
+        "ins_source_sales": "💰 Fuente: ventas reales",
+        "ins_no_product": "Selecciona un producto en «Nueva cotización» para ver su analítica específica. Mostrando vista general.",
+        "ins_prod_min": "Mínimo", "ins_prod_max": "Máximo", "ins_prod_avg": "Promedio",
+        "ins_prod_last": "Última", "ins_prod_count": "N.º registros",
+        "ins_price_time": "Precio en el tiempo",
+        "ins_by_client_prod": "Por cliente (precio promedio)",
+        "ins_no_prod_data": "Sin datos históricos para «{p}» todavía.",
+        "sales_header": "Archivo de ventas (opcional)",
+        "sales_help": "Sube ventas reales (CSV/Excel). Si está presente, la analítica usa precios de venta reales en vez de cotizados.",
+        "sales_prompt": "Sube archivo de ventas",
+        "sales_ok": "Ventas cargadas: {n} registros",
+        "sales_error": "No se pudo leer ventas: {err}",
+        "sales_clear": "Quitar archivo de ventas",
         "footer": "Fórmula: (costo + overhead) / (1−GM) / (1−comisión) / (1−duty) / forex",
         # --- modo OneDrive local ---
         "mode_label": "Fuente del histórico",
@@ -277,6 +298,25 @@ T = {
         "ins_by_customer": "Average GM by customer (top 15)",
         "ins_top_products": "Most quoted products (top 15)",
         "ins_over_time": "Quotes per month",
+        "use_in_quote": "📋 Use in new quote",
+        "preloaded_ok": "✓ «{p}» preloaded — go to the «New quote» tab to adjust and quote.",
+        "sel_to_preload": "Select the row to preload",
+        "row_label": "{date} · {cust} · {prod} · ${q}",
+        "ins_product_header": "📊 Analytics for «{p}»",
+        "ins_source_quotes": "📊 Source: historical quotes",
+        "ins_source_sales": "💰 Source: real sales",
+        "ins_no_product": "Select a product in «New quote» to see its specific analytics. Showing general view.",
+        "ins_prod_min": "Min", "ins_prod_max": "Max", "ins_prod_avg": "Average",
+        "ins_prod_last": "Last", "ins_prod_count": "Records",
+        "ins_price_time": "Price over time",
+        "ins_by_client_prod": "By customer (avg price)",
+        "ins_no_prod_data": "No historical data for «{p}» yet.",
+        "sales_header": "Sales file (optional)",
+        "sales_help": "Upload real sales (CSV/Excel). If present, analytics uses real sale prices instead of quoted ones.",
+        "sales_prompt": "Upload sales file",
+        "sales_ok": "Sales loaded: {n} records",
+        "sales_error": "Could not read sales: {err}",
+        "sales_clear": "Remove sales file",
         "footer": "Formula: (cost + overhead) / (1−GM) / (1−commission) / (1−duty) / forex",
         # --- OneDrive local mode ---
         "mode_label": "History source",
@@ -383,6 +423,49 @@ def load_uploaded(file):
     return normalize_history(df)
 
 
+def load_sales(file):
+    """Lee un archivo de ventas reales y lo normaliza a columnas: product, code, price, date, customer, qty.
+    Es flexible: detecta los nombres de columna más comunes (ES/EN) por coincidencia.
+    Requisito mínimo: alguna columna de producto o código, y alguna de precio.
+    """
+    name = file.name.lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(file)
+    elif name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(file)
+    else:
+        raise ValueError("Formato no soportado (usa CSV o Excel).")
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    def find(cands):
+        for cand in cands:
+            for col in df.columns:
+                if cand == col or cand in col:
+                    return col
+        return None
+
+    col_prod = find(["product", "producto", "item", "descripcion", "description", "material"])
+    col_code = find(["code", "codigo", "código", "sku", "enr", "ref", "articulo", "artículo"])
+    col_price = find(["price", "precio", "sale", "venta", "unit price", "precio unitario",
+                      "precio venta", "importe", "amount", "valor"])
+    col_date = find(["date", "fecha", "invoice date", "fecha factura"])
+    col_cust = find(["customer", "cliente", "client", "account", "cuenta"])
+    col_qty = find(["qty", "quantity", "cantidad", "volumen", "volume", "kg", "units"])
+
+    if col_price is None or (col_prod is None and col_code is None):
+        raise ValueError("El archivo de ventas necesita al menos una columna de precio y una de producto o código.")
+
+    out = pd.DataFrame()
+    out["product"] = df[col_prod].fillna("").astype(str).str.strip() if col_prod else ""
+    out["code"] = df[col_code].apply(normalize_code) if col_code else ""
+    out["price"] = pd.to_numeric(df[col_price], errors="coerce")
+    out["date"] = df[col_date].fillna("").astype(str) if col_date else ""
+    out["customer"] = df[col_cust].fillna("").astype(str).str.strip() if col_cust else ""
+    out["qty"] = pd.to_numeric(df[col_qty], errors="coerce") if col_qty else pd.NA
+    out = out[out["price"].notna()]
+    return out
+
+
 def read_local(path):
     """Lee el histórico desde una ruta local (CSV o Excel). Devuelve DataFrame normalizado."""
     ext = os.path.splitext(path)[1].lower()
@@ -471,6 +554,10 @@ if "cart" not in st.session_state:
     st.session_state.cart = []               # lista de dicts (cotizaciones de la sesión)
 if "base_row" not in st.session_state:
     st.session_state.base_row = {}           # fila cargada como base en el formulario
+if "active_product" not in st.session_state:
+    st.session_state.active_product = ""     # producto en foco (para analytics contextual)
+if "sales" not in st.session_state:
+    st.session_state.sales = None            # DataFrame de ventas reales (opcional)
 if "local_path" not in st.session_state:
     st.session_state.local_path = ""         # ruta al archivo en OneDrive (modo local)
 
@@ -563,6 +650,23 @@ with st.sidebar:
 
     st.caption(t["session_privacy"])
 
+    # --- Archivo de ventas reales (opcional) ---
+    st.markdown("---")
+    st.subheader(t["sales_header"])
+    sales_up = st.file_uploader(t["sales_prompt"], type=["csv", "xlsx", "xls"],
+                                help=t["sales_help"], label_visibility="collapsed",
+                                key="sales_uploader")
+    if sales_up is not None:
+        try:
+            st.session_state.sales = load_sales(sales_up)
+            st.success(t["sales_ok"].format(n=len(st.session_state.sales)))
+        except Exception as exc:  # noqa: BLE001
+            st.error(t["sales_error"].format(err=exc))
+    if st.session_state.sales is not None and len(st.session_state.sales):
+        if st.button(t["sales_clear"]):
+            st.session_state.sales = None
+            st.rerun()
+
 t = T[st.session_state.lang]
 hist = st.session_state.history
 
@@ -615,9 +719,33 @@ with tab_search:
                 show[t["col_gm"]] = res["gm"].apply(pct).values
                 st.dataframe(show, use_container_width=True, hide_index=True,
                              height=min(560, 60 + 35 * len(res)))
-                st.caption("💡 " + ("Copia un producto y cárgalo en «Nueva cotización» para calcular con su base."
-                                    if st.session_state.lang == "es" else
-                                    "Copy a product into «New quote» to calculate from its base."))
+
+                # --- Precargar una fila en «Nueva cotización» con un clic ---
+                res_reset = res.reset_index(drop=True)
+                labels = [t["row_label"].format(date=r["date"], cust=(r["customer"] or "—"),
+                                                prod=r["product"], q=fmt(r["quote"]))
+                          for _, r in res_reset.iterrows()]
+                pc1, pc2 = st.columns([3, 1])
+                with pc1:
+                    sel_idx = st.selectbox(t["sel_to_preload"], range(len(labels)),
+                                           format_func=lambda i: labels[i], key="preload_sel")
+                with pc2:
+                    st.write("")
+                    st.write("")
+                    if st.button(t["use_in_quote"], type="primary", use_container_width=True):
+                        row = res_reset.iloc[sel_idx]
+                        st.session_state.base_row = {
+                            "customer": row["customer"], "product": row["product"],
+                            "code": row["code"], "uom": row["uom"] or "kg",
+                            "matl": float(row["matl"]) if pd.notna(row["matl"]) else 0.0,
+                            "ovrhd": float(row["ovrhd"]) if pd.notna(row["ovrhd"]) else 2.0,
+                            "gm": float(row["gm"]) if pd.notna(row["gm"]) else 0.30,
+                            "comm": float(row["comm"]) if pd.notna(row["comm"]) else 0.0,
+                            "duty": float(row["duty"]) if pd.notna(row["duty"]) else 0.0,
+                            "forex": float(row["forex"]) if pd.notna(row["forex"]) else 1.37,
+                        }
+                        st.session_state.active_product = row["product"]
+                        st.success(t["preloaded_ok"].format(p=row["product"]))
 
 # ============================================================================
 # TAB 2 — Nueva cotización
@@ -794,6 +922,10 @@ with tab_quote:
             st.caption(t["code_family"].format(n=len([c for c in family_codes]), p=product))
 
         uom = r2c2.text_input(t["uom"], value=auto.get("uom", b.get("uom", "kg")))
+
+        # Registrar el producto en foco para la analítica contextual
+        if product and product.strip():
+            st.session_state.active_product = product.strip()
 
         st.markdown("---")
         m1, m2, m3 = st.columns(3)
@@ -1036,10 +1168,69 @@ with tab_batch:
             )
 # ============================================================================
 with tab_insights:
-    st.subheader(t["insights_header"])
+    sales = st.session_state.sales
+    active = st.session_state.get("active_product", "").strip()
+
     if hist is None or not len(hist):
+        st.subheader(t["insights_header"])
         st.info(t["insights_none"])
+    elif active:
+        # ---------- ANALÍTICA CONTEXTUAL DEL PRODUCTO ----------
+        st.subheader(t["ins_product_header"].format(p=active))
+
+        use_sales = sales is not None and len(sales) > 0
+        # Filtrar los datos de ese producto en la fuente elegida
+        if use_sales:
+            # match por producto (case-insensitive) o por código
+            sp = sales[sales["product"].str.strip().str.lower() == active.lower()]
+            if not len(sp):
+                # intentar por código: buscar códigos de ese producto en el histórico
+                prod_codes = set(hist[hist["product"].str.strip().str.lower() == active.lower()]["code"])
+                sp = sales[sales["code"].isin(prod_codes)]
+            data = sp.rename(columns={"price": "value"})
+            source_label = t["ins_source_sales"]
+        else:
+            hp = hist[hist["product"].str.strip().str.lower() == active.lower()].copy()
+            data = hp.rename(columns={"quote": "value"})
+            source_label = t["ins_source_quotes"]
+
+        st.caption(source_label)
+
+        if not len(data) or data["value"].dropna().empty:
+            st.info(t["ins_no_prod_data"].format(p=active))
+        else:
+            vals = data["value"].dropna()
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric(t["ins_prod_min"], f"${fmt(vals.min())}")
+            m2.metric(t["ins_prod_avg"], f"${fmt(vals.mean())}")
+            m3.metric(t["ins_prod_max"], f"${fmt(vals.max())}")
+            data_dated = data[data["date"].astype(str).str.strip() != ""].copy()
+            if len(data_dated):
+                data_dated = data_dated.sort_values("date")
+                m4.metric(t["ins_prod_last"], f"${fmt(data_dated.iloc[-1]['value'])}")
+            m5.metric(t["ins_prod_count"], f"{len(vals)}")
+
+            # Precio en el tiempo
+            if len(data_dated):
+                st.markdown(f"###### {t['ins_price_time']}")
+                ts = data_dated.copy()
+                ts["_d"] = pd.to_datetime(ts["date"], errors="coerce")
+                ts = ts.dropna(subset=["_d"]).set_index("_d")["value"]
+                if len(ts):
+                    st.line_chart(ts)
+
+            # Por cliente (precio promedio para este producto)
+            if "customer" in data.columns and (data["customer"].astype(str).str.strip() != "").any():
+                st.markdown(f"###### {t['ins_by_client_prod']}")
+                by_c = (data[data["customer"].astype(str).str.strip() != ""]
+                        .groupby("customer")["value"].mean().sort_values(ascending=False).head(15))
+                st.bar_chart(by_c)
+
+        st.caption(t["ins_no_product"])
     else:
+        # ---------- VISTA GENERAL (sin producto activo) ----------
+        st.subheader(t["insights_header"])
+        st.caption(t["ins_no_product"])
         ic1, ic2 = st.columns(2)
         with ic1:
             st.markdown(f"###### {t['ins_by_customer']}")
