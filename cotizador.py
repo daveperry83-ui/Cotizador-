@@ -355,6 +355,58 @@ COLS = ["date", "customer", "broker", "product", "code", "matl", "ovrhd",
 NUMERIC = ["matl", "ovrhd", "gm", "comm", "duty", "forex", "quote"]
 
 
+@st.cache_data(show_spinner=False)
+def build_relation_maps(hist_key):
+    """Construye los mapas de relación producto/código/cliente UNA sola vez y los cachea.
+    Recibe una representación hashable (tuplas) del histórico para que el caché funcione.
+    Usa groupby vectorizado en vez de iterrows (mucho más rápido con miles de filas).
+    Devuelve un dict con todas las estructuras que el formulario necesita.
+    """
+    df = pd.DataFrame(hist_key, columns=["product", "code", "customer", "date"])
+    df = df[df["product"].astype(str).str.strip() != ""].copy()
+    df["product"] = df["product"].astype(str).str.strip()
+    df["code"] = df["code"].astype(str).str.strip()
+    df["customer"] = df["customer"].astype(str).str.strip()
+    df["plow"] = df["product"].str.lower()
+
+    # nombre canónico = grafía más reciente por producto (case-insensitive)
+    canon_df = df.sort_values("date").drop_duplicates("plow", keep="last")
+    prod_canonical = dict(zip(canon_df["plow"], canon_df["product"]))
+    df["canon"] = df["plow"].map(prod_canonical)
+
+    prod_options = sorted(prod_canonical.values(), key=str.lower)
+    cust_options = sorted({c for c in df["customer"] if c}, key=str.lower)
+
+    with_code = df[df["code"] != ""]
+    prod_to_codes = {k: sorted(set(v), key=str.lower)
+                     for k, v in with_code.groupby("canon")["code"].apply(list).items()}
+    code_to_prods = {k: sorted(set(v), key=str.lower)
+                     for k, v in with_code.groupby("code")["canon"].apply(list).items()}
+    wc_cust = with_code[with_code["customer"] != ""]
+    code_to_custs = {k: sorted(set(v), key=str.lower)
+                     for k, v in wc_cust.groupby("code")["customer"].apply(list).items()}
+    with_cust = df[df["customer"] != ""]
+    cust_to_prods = {k: sorted(set(v), key=str.lower)
+                     for k, v in with_cust.groupby("customer")["canon"].apply(list).items()}
+    code_options = sorted(code_to_prods.keys(), key=str.lower)
+
+    return {
+        "prod_options": prod_options, "code_options": code_options, "cust_options": cust_options,
+        "prod_to_codes": prod_to_codes, "code_to_prods": code_to_prods,
+        "code_to_custs": code_to_custs, "cust_to_prods": cust_to_prods,
+        "prod_canonical": prod_canonical,
+    }
+
+
+@st.cache_data(show_spinner=False)
+def get_search_index(hist_key):
+    """Precalcula (una sola vez) la cadena de búsqueda en minúsculas por fila.
+    Evita reconstruirla en cada tecla del buscador."""
+    df = pd.DataFrame(hist_key, columns=["product", "code", "customer", "broker"])
+    return (df["product"].str.lower() + " " + df["code"].str.lower() + " "
+            + df["customer"].str.lower() + " " + df["broker"].str.lower())
+
+
 def normalize_code(code):
     """Normaliza un código a formato NR/ENR.
     - Números puros -> se antepone NR (11064 -> NR11064).
@@ -847,8 +899,9 @@ with tab_search:
         st.caption(t["search_hint"])
         if q.strip():
             terms = q.lower().split()
-            hay = (hist["product"].str.lower() + " " + hist["code"].str.lower()
-                   + " " + hist["customer"].str.lower() + " " + hist["broker"].str.lower())
+            hay = get_search_index(tuple(map(tuple,
+                    hist[["product", "code", "customer", "broker"]].values)))
+            hay.index = hist.index
             mask = pd.Series(True, index=hist.index)
             for term in terms:
                 mask &= hay.str.contains(term, regex=False, na=False)
@@ -911,42 +964,23 @@ with tab_quote:
         st.subheader(t["form_header"])
 
         # ============================================================
-        # Mapas de relación desde el histórico (case-insensitive)
+        # Mapas de relación desde el histórico (cacheados = rápidos)
         # ============================================================
         prod_options, code_options, cust_options = [], [], []
-        prod_to_codes = {}       # producto -> [códigos]
-        code_to_prods = {}       # código   -> [productos]
-        code_to_custs = {}       # código   -> [clientes]
-        cust_to_prods = {}       # cliente  -> [productos]
-        prod_canonical = {}      # lower(nombre) -> nombre canónico
+        prod_to_codes, code_to_prods, code_to_custs, cust_to_prods, prod_canonical = {}, {}, {}, {}, {}
 
         if hist is not None and len(hist):
-            h2 = hist[hist["product"].astype(str).str.strip() != ""].copy()
-            for _, row in h2.sort_values("date").iterrows():
-                prod_canonical[str(row["product"]).strip().lower()] = str(row["product"]).strip()
-            prod_options = sorted(prod_canonical.values(), key=lambda x: x.lower())
-            cust_options = sorted({str(c).strip() for c in hist["customer"] if str(c).strip()},
-                                  key=lambda x: x.lower())
-            for _, row in h2.iterrows():
-                canon = prod_canonical.get(str(row["product"]).strip().lower(), str(row["product"]).strip())
-                cd = str(row["code"]).strip()
-                cu = str(row["customer"]).strip()
-                if cd:
-                    prod_to_codes.setdefault(canon, [])
-                    if cd not in prod_to_codes[canon]:
-                        prod_to_codes[canon].append(cd)
-                    code_to_prods.setdefault(cd, [])
-                    if canon not in code_to_prods[cd]:
-                        code_to_prods[cd].append(canon)
-                    if cu:
-                        code_to_custs.setdefault(cd, [])
-                        if cu not in code_to_custs[cd]:
-                            code_to_custs[cd].append(cu)
-                if cu:
-                    cust_to_prods.setdefault(cu, [])
-                    if canon not in cust_to_prods[cu]:
-                        cust_to_prods[cu].append(canon)
-            code_options = sorted(code_to_prods.keys(), key=lambda x: x.lower())
+            # Clave hashable para el caché: solo las 4 columnas relevantes como tuplas.
+            hist_key = tuple(map(tuple, hist[["product", "code", "customer", "date"]].values))
+            maps = build_relation_maps(hist_key)
+            prod_options = maps["prod_options"]
+            code_options = maps["code_options"]
+            cust_options = maps["cust_options"]
+            prod_to_codes = maps["prod_to_codes"]
+            code_to_prods = maps["code_to_prods"]
+            code_to_custs = maps["code_to_custs"]
+            cust_to_prods = maps["cust_to_prods"]
+            prod_canonical = maps["prod_canonical"]
 
         NEW = t["write_new"]
         GRP_CAT = t["grp_catalog"]
