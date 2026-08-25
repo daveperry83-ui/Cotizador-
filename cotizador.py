@@ -355,14 +355,10 @@ COLS = ["date", "customer", "broker", "product", "code", "matl", "ovrhd",
 NUMERIC = ["matl", "ovrhd", "gm", "comm", "duty", "forex", "quote"]
 
 
-@st.cache_data(show_spinner=False)
-def build_relation_maps(hist_key):
-    """Construye los mapas de relación producto/código/cliente UNA sola vez y los cachea.
-    Recibe una representación hashable (tuplas) del histórico para que el caché funcione.
-    Usa groupby vectorizado en vez de iterrows (mucho más rápido con miles de filas).
-    Devuelve un dict con todas las estructuras que el formulario necesita.
+def _build_relation_maps(df):
+    """Construye los mapas de relación producto/código/cliente.
+    Recibe el DataFrame directamente (sin convertir a tuplas). Vectorizado con groupby.
     """
-    df = pd.DataFrame(hist_key, columns=["product", "code", "customer", "date"])
     df = df[df["product"].astype(str).str.strip() != ""].copy()
     df["product"] = df["product"].astype(str).str.strip()
     df["code"] = df["code"].astype(str).str.strip()
@@ -390,6 +386,11 @@ def build_relation_maps(hist_key):
                      for k, v in with_cust.groupby("customer")["canon"].apply(list).items()}
     code_options = sorted(code_to_prods.keys(), key=str.lower)
 
+    # índice de búsqueda (cadena en minúsculas por fila) — precalculado aquí también
+    search_index = (df["plow"] + " " + df["code"].str.lower() + " "
+                    + df["customer"].str.lower())
+    search_index.index = df.index
+
     return {
         "prod_options": prod_options, "code_options": code_options, "cust_options": cust_options,
         "prod_to_codes": prod_to_codes, "code_to_prods": code_to_prods,
@@ -398,13 +399,29 @@ def build_relation_maps(hist_key):
     }
 
 
-@st.cache_data(show_spinner=False)
-def get_search_index(hist_key):
-    """Precalcula (una sola vez) la cadena de búsqueda en minúsculas por fila.
-    Evita reconstruirla en cada tecla del buscador."""
-    df = pd.DataFrame(hist_key, columns=["product", "code", "customer", "broker"])
-    return (df["product"].str.lower() + " " + df["code"].str.lower() + " "
-            + df["customer"].str.lower() + " " + df["broker"].str.lower())
+def get_cached_maps(hist):
+    """Devuelve los mapas de relación, calculándolos SOLO cuando el histórico cambia.
+    Guarda el resultado en session_state con una firma ligera, así en cada interacción
+    normal no se recalcula ni se rehashea nada pesado.
+    La firma combina nº de filas + una muestra estable (primer/último producto y quote),
+    que cambia si el histórico se reemplaza o se le agregan cotizaciones.
+    """
+    n = len(hist)
+    try:
+        sig = (n,
+               str(hist["product"].iloc[0]), str(hist["product"].iloc[-1]),
+               float(hist["quote"].iloc[-1]) if pd.notna(hist["quote"].iloc[-1]) else 0.0)
+    except Exception:
+        sig = (n,)
+    cached = st.session_state.get("_maps_cache")
+    if cached is not None and cached.get("sig") == sig:
+        return cached["maps"]
+    maps = _build_relation_maps(hist)
+    idx = (hist["product"].str.lower() + " " + hist["code"].str.lower() + " "
+           + hist["customer"].str.lower() + " " + hist["broker"].str.lower())
+    maps["_search_index"] = idx
+    st.session_state["_maps_cache"] = {"sig": sig, "maps": maps}
+    return maps
 
 
 def normalize_code(code):
@@ -899,9 +916,7 @@ with tab_search:
         st.caption(t["search_hint"])
         if q.strip():
             terms = q.lower().split()
-            hay = get_search_index(tuple(map(tuple,
-                    hist[["product", "code", "customer", "broker"]].values)))
-            hay.index = hist.index
+            hay = get_cached_maps(hist)["_search_index"]
             mask = pd.Series(True, index=hist.index)
             for term in terms:
                 mask &= hay.str.contains(term, regex=False, na=False)
@@ -970,9 +985,7 @@ with tab_quote:
         prod_to_codes, code_to_prods, code_to_custs, cust_to_prods, prod_canonical = {}, {}, {}, {}, {}
 
         if hist is not None and len(hist):
-            # Clave hashable para el caché: solo las 4 columnas relevantes como tuplas.
-            hist_key = tuple(map(tuple, hist[["product", "code", "customer", "date"]].values))
-            maps = build_relation_maps(hist_key)
+            maps = get_cached_maps(hist)
             prod_options = maps["prod_options"]
             code_options = maps["code_options"]
             cust_options = maps["cust_options"]
