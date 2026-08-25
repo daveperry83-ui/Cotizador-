@@ -177,6 +177,8 @@ T = {
         "row_label": "{date} · {cust} · {prod} · ${q}",
         # --- analytics de producto / ventas ---
         "ins_product_header": "📊 Analítica de «{p}»",
+        "ins_code_header": "📊 Analítica del código «{c}» ({p})",
+        "ins_code_note": "Mostrando solo el código exacto que estás cotizando. Otros códigos de este mismo producto pueden tener precios distintos.",
         "ins_source_quotes": "📊 Fuente: cotizaciones históricas",
         "ins_source_sales": "💰 Fuente: ventas reales",
         "ins_no_product": "Selecciona un producto en «Nueva cotización» para ver su analítica específica. Mostrando vista general.",
@@ -315,6 +317,8 @@ T = {
         "sel_to_preload": "Select the row to preload",
         "row_label": "{date} · {cust} · {prod} · ${q}",
         "ins_product_header": "📊 Analytics for «{p}»",
+        "ins_code_header": "📊 Analytics for code «{c}» ({p})",
+        "ins_code_note": "Showing only the exact code you're quoting. Other codes of this same product may have different prices.",
         "ins_source_quotes": "📊 Source: historical quotes",
         "ins_source_sales": "💰 Source: real sales",
         "ins_no_product": "Select a product in «New quote» to see its specific analytics. Showing general view.",
@@ -862,9 +866,21 @@ with st.sidebar:
             label_visibility="collapsed",
         )
         if uploaded is not None:
-            try:
-                st.session_state.history, diag = load_uploaded(uploaded, return_diagnostics=True)
-                st.session_state.local_path = ""  # subir no permite reescritura
+            # Streamlit conserva el archivo en memoria entre reruns: sin esta firma,
+            # se reprocesarían las 5000+ filas (incluida la limpieza de nombres) en
+            # CADA clic o tecla, no solo al subir. Solo reprocesamos si cambió.
+            upload_sig = (uploaded.name, uploaded.size)
+            if st.session_state.get("_upload_sig") != upload_sig:
+                try:
+                    st.session_state.history, diag = load_uploaded(uploaded, return_diagnostics=True)
+                    st.session_state.local_path = ""  # subir no permite reescritura
+                    st.session_state._upload_sig = upload_sig
+                    st.session_state._upload_diag = diag
+                except Exception as exc:  # noqa: BLE001
+                    st.error(t["load_error"].format(err=exc))
+                    st.session_state._upload_diag = None
+            diag = st.session_state.get("_upload_diag")
+            if diag:
                 detected, miss_ess, miss_imp = diag
                 if detected:
                     st.caption(t["detect_ok"].format(cols=", ".join(detected)))
@@ -873,8 +889,6 @@ with st.sidebar:
                 elif miss_imp:
                     st.caption(t["detect_missing_important"].format(cols=", ".join(miss_imp)))
                 st.caption(t["template_hint"])
-            except Exception as exc:  # noqa: BLE001
-                st.error(t["load_error"].format(err=exc))
 
     hist = st.session_state.history
     if hist is not None and len(hist):
@@ -921,14 +935,26 @@ with st.sidebar:
                                 help=t["sales_help"], label_visibility="collapsed",
                                 key="sales_uploader")
     if sales_up is not None:
-        try:
-            st.session_state.sales = load_sales(sales_up)
-            st.success(t["sales_ok"].format(n=len(st.session_state.sales)))
-        except Exception as exc:  # noqa: BLE001
-            st.error(t["sales_error"].format(err=exc))
+        # Igual que el histórico: sin firma, el pivote R12 (con su bucle fila-a-fila)
+        # se reprocesaría en CADA interacción, no solo al subir el archivo.
+        sales_sig = (sales_up.name, sales_up.size)
+        if st.session_state.get("_sales_sig") != sales_sig:
+            try:
+                st.session_state.sales = load_sales(sales_up)
+                st.session_state._sales_sig = sales_sig
+                st.session_state._sales_msg = ("ok", len(st.session_state.sales))
+            except Exception as exc:  # noqa: BLE001
+                st.session_state._sales_msg = ("error", str(exc))
+        msg = st.session_state.get("_sales_msg")
+        if msg:
+            if msg[0] == "ok":
+                st.success(t["sales_ok"].format(n=msg[1]))
+            else:
+                st.error(t["sales_error"].format(err=msg[1]))
     if st.session_state.sales is not None and len(st.session_state.sales):
         if st.button(t["sales_clear"]):
             st.session_state.sales = None
+            st.session_state._sales_sig = None
             st.rerun()
 
 t = T[st.session_state.lang]
@@ -1392,29 +1418,44 @@ with tab_batch:
 with tab_insights:
     sales = st.session_state.sales
     active = st.session_state.get("active_product", "").strip()
+    active_code = st.session_state.get("active_code", "").strip()
 
     if hist is None or not len(hist):
         st.subheader(t["insights_header"])
         st.info(t["insights_none"])
     elif active:
-        # ---------- ANALÍTICA CONTEXTUAL DEL PRODUCTO ----------
-        st.subheader(t["ins_product_header"].format(p=active))
+        # ---------- ANALÍTICA CONTEXTUAL: por CÓDIGO exacto si hay uno, si no por producto ----------
+        by_code = bool(active_code)
+        if by_code:
+            st.subheader(t["ins_code_header"].format(c=active_code, p=active))
+            st.caption(t["ins_code_note"])
+        else:
+            st.subheader(t["ins_product_header"].format(p=active))
 
         use_sales = sales is not None and len(sales) > 0
-        # Filtrar los datos de ese producto en la fuente elegida
-        if use_sales:
-            # match por producto (case-insensitive) O por cualquier código de esa familia
-            prod_codes = set(hist[hist["product"].str.strip().str.lower() == active.lower()]["code"]) - {""}
-            sp = sales[
-                (sales["product"].str.strip().str.lower() == active.lower())
-                | (sales["code"].isin(prod_codes))
-            ]
-            data = sp.rename(columns={"price": "value"})
-            source_label = t["ins_source_sales"]
+        if by_code:
+            # Filtro estricto por código exacto (no mezcla otros códigos del mismo producto)
+            if use_sales:
+                data = sales[sales["code"] == active_code].rename(columns={"price": "value"})
+                source_label = t["ins_source_sales"]
+            else:
+                hp = hist[hist["code"] == active_code].copy()
+                data = hp.rename(columns={"quote": "value"})
+                source_label = t["ins_source_quotes"]
         else:
-            hp = hist[hist["product"].str.strip().str.lower() == active.lower()].copy()
-            data = hp.rename(columns={"quote": "value"})
-            source_label = t["ins_source_quotes"]
+            # Sin código elegido todavía: cae al producto completo (todos sus códigos)
+            if use_sales:
+                prod_codes = set(hist[hist["product"].str.strip().str.lower() == active.lower()]["code"]) - {""}
+                sp = sales[
+                    (sales["product"].str.strip().str.lower() == active.lower())
+                    | (sales["code"].isin(prod_codes))
+                ]
+                data = sp.rename(columns={"price": "value"})
+                source_label = t["ins_source_sales"]
+            else:
+                hp = hist[hist["product"].str.strip().str.lower() == active.lower()].copy()
+                data = hp.rename(columns={"quote": "value"})
+                source_label = t["ins_source_quotes"]
 
         st.caption(source_label)
 
