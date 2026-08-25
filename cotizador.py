@@ -182,6 +182,10 @@ T = {
         "ins_no_product": "Selecciona un producto en «Nueva cotización» para ver su analítica específica. Mostrando vista general.",
         "ins_prod_min": "Mínimo", "ins_prod_max": "Máximo", "ins_prod_avg": "Promedio",
         "ins_prod_last": "Última", "ins_prod_count": "N.º registros",
+        "ins_detail_header": "Detalle de precios de referencia",
+        "ins_col_date": "Fecha", "ins_col_customer": "Cliente", "ins_col_price": "Precio",
+        "ins_col_code": "Código",
+        "ins_on_date": "el {d}",
         "ins_price_time": "Precio en el tiempo",
         "ins_by_client_prod": "Por cliente (precio promedio)",
         "ins_no_prod_data": "Sin datos históricos para «{p}» todavía.",
@@ -316,6 +320,10 @@ T = {
         "ins_no_product": "Select a product in «New quote» to see its specific analytics. Showing general view.",
         "ins_prod_min": "Min", "ins_prod_max": "Max", "ins_prod_avg": "Average",
         "ins_prod_last": "Last", "ins_prod_count": "Records",
+        "ins_detail_header": "Reference price detail",
+        "ins_col_date": "Date", "ins_col_customer": "Customer", "ins_col_price": "Price",
+        "ins_col_code": "Code",
+        "ins_on_date": "on {d}",
         "ins_price_time": "Price over time",
         "ins_by_client_prod": "By customer (avg price)",
         "ins_no_prod_data": "No historical data for «{p}» yet.",
@@ -513,9 +521,49 @@ def remap_columns(df):
     return df, sorted(used_targets)
 
 
+def _consolidate_names(series):
+    """Consolida variantes de un mismo nombre que difieren solo por
+    mayúsculas/minúsculas o espacios. Devuelve un mapeo {variante -> forma_canónica}.
+    La forma canónica es la grafía MÁS FRECUENTE (si empatan, la primera alfabéticamente),
+    para no imponer un Title Case que rompa acrónimos (OR, WS, US, etc.).
+    """
+    from collections import Counter
+    s = series.fillna("").astype(str).str.strip()
+    s = s[s != ""]
+    # clave de agrupación: minúsculas + espacios colapsados
+    keys = s.str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
+    mapping = {}
+    tmp = pd.DataFrame({"orig": s.values, "key": keys.values})
+    for key, grp in tmp.groupby("key"):
+        variants = grp["orig"].tolist()
+        if len(set(variants)) <= 1:
+            continue  # no hay variantes conflictivas
+        # la grafía más frecuente gana
+        counts = Counter(variants)
+        best = max(counts, key=lambda v: (counts[v], -len(v)))
+        for v in set(variants):
+            if v != best:
+                mapping[v] = best
+    return mapping
+
+
+def clean_history_names(df):
+    """Aplica consolidación de nombres a customer y product en el histórico,
+    para que no aparezcan duplicados por diferencias de mayúsculas o espacios.
+    Se ejecuta en cada carga: el histórico queda siempre limpio."""
+    for col in ["customer", "product"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+            mapping = _consolidate_names(df[col])
+            if mapping:
+                df[col] = df[col].replace(mapping)
+    return df
+
+
 def normalize_history(df):
     """Ajusta un dataframe cargado al esquema esperado, tolerante a columnas faltantes.
     Primero intenta mapear nombres de columna ajenos (ES/EN) a los canónicos.
+    Luego limpia automáticamente los nombres (sin duplicados por mayúsculas/espacios).
     """
     df = df.copy()
     # Paso 1: intento de mapeo flexible ANTES de bajar a minúsculas crudas
@@ -532,6 +580,7 @@ def normalize_history(df):
         df[c] = df[c].fillna("").astype(str)
     df["uom"] = df["uom"].replace("", "kg")
     df["code"] = df["code"].apply(normalize_code)  # normaliza códigos a NR/ENR
+    df = clean_history_names(df)                    # consolida nombres duplicados
     return df
 
 
@@ -996,83 +1045,41 @@ with tab_quote:
             prod_canonical = maps["prod_canonical"]
 
         NEW = t["write_new"]
-        GRP_CAT = t["grp_catalog"]
         b = st.session_state.base_row
 
-        def sep(label):
-            """Devuelve un separador visual no seleccionable."""
-            return "── " + label + " ──"
+        # Opciones completas, pre-ordenadas UNA sola vez (cacheadas). Sin filtrado
+        # dinámico: los desplegables muestran todo y tú escribes para filtrar dentro
+        # del propio selectbox de Streamlit -> respuesta instantánea.
+        cust_full = [NEW] + cust_options
+        prod_full = [NEW] + prod_options
+        code_full = [NEW] + code_options
 
-        # ============================================================
-        # 1) CÓDIGO primero (permite el flujo código -> producto/cliente)
-        #    Lo leemos ANTES para poder filtrar cliente y producto por él.
-        # ============================================================
-        # El código elegido en la corrida previa (si lo hay)
-        chosen_code = st.session_state.get("code_pick", None)
-        if chosen_code in (NEW, None) or (chosen_code and chosen_code.startswith("──")):
-            chosen_code = None
-
-        # ============================================================
-        # 2) CLIENTE: híbrido, filtrado por código si hay uno elegido
-        # ============================================================
+        # ---- CLIENTE ----
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             if cust_options:
-                if chosen_code and chosen_code in code_to_custs:
-                    # solo clientes que han cotizado ese código, + resto
-                    linked = sorted(code_to_custs[chosen_code], key=lambda x: x.lower())
-                    rest = [c for c in cust_options if c not in linked]
-                    copts = [NEW] + linked + ([sep(GRP_CAT)] + rest if rest else [])
-                else:
-                    copts = [NEW] + cust_options
-                # valor inicial desde base_row (precarga)
                 base_cust = b.get("customer", "")
                 if "cust_pick" not in st.session_state and base_cust in cust_options:
                     st.session_state.cust_pick = base_cust
-                elif "cust_pick" in st.session_state and st.session_state.cust_pick not in copts:
-                    st.session_state.cust_pick = NEW
-                cpick = st.selectbox(t["customer_pick"], copts, key="cust_pick")
+                cpick = st.selectbox(t["customer_pick"], cust_full, key="cust_pick")
                 if cpick == NEW:
                     customer = st.text_input(t["customer_new"], key="cust_new",
                                              value=base_cust if base_cust and base_cust not in cust_options else "")
-                elif cpick.startswith("──"):
-                    customer = ""
                 else:
                     customer = cpick
             else:
                 customer = st.text_input(t["customer"], value=b.get("customer", ""))
 
-        # ============================================================
-        # 3) PRODUCTO: híbrido. Prioridad de filtrado:
-        #    a) si hay código elegido -> productos de ese código
-        #    b) elif hay cliente -> productos del cliente + resto
-        #    c) else -> catálogo completo
-        # ============================================================
+        # ---- PRODUCTO ----
         with r1c2:
             if prod_options:
-                if chosen_code and chosen_code in code_to_prods:
-                    linked_p = sorted(code_to_prods[chosen_code], key=lambda x: x.lower())
-                    rest_p = [p for p in prod_options if p not in linked_p]
-                    popts = [NEW] + linked_p + ([sep(GRP_CAT)] + rest_p if rest_p else [])
-                elif customer and customer.strip() and customer in cust_to_prods:
-                    cprods = sorted(cust_to_prods[customer], key=lambda x: x.lower())
-                    rest_p = [p for p in prod_options if p not in cprods]
-                    popts = [NEW] + [sep(t["grp_client"].format(c=customer.strip()[:20]))] + cprods \
-                            + ([sep(GRP_CAT)] + rest_p if rest_p else [])
-                else:
-                    popts = [NEW] + prod_options
-
                 base_prod = b.get("product", "")
                 if "prod_pick" not in st.session_state and base_prod in prod_options:
                     st.session_state.prod_pick = base_prod
-                elif "prod_pick" in st.session_state and st.session_state.prod_pick not in popts:
-                    st.session_state.prod_pick = NEW
-                pick = st.selectbox(t["product_pick"], popts, key="prod_pick", help=t["autofill_hint"])
+                pick = st.selectbox(t["product_pick"], prod_full, key="prod_pick", help=t["autofill_hint"])
                 if pick == NEW:
                     product = st.text_input(t["product_new"], key="prod_new",
                                             value=base_prod if base_prod and base_prod not in prod_options else "")
-                elif pick.startswith("──"):
-                    product = ""
                 else:
                     product = pick
             else:
@@ -1080,11 +1087,13 @@ with tab_quote:
 
         # ============================================================
         # Autocompletar base (prioriza última cotización del cliente)
+        # Usa el índice cacheado en vez de filtrar el histórico completo.
         # ============================================================
         auto = {}
         client_last = None
         if hist is not None and len(hist) and product:
-            fam = hist[hist["product"].str.strip().str.lower() == product.strip().lower()]
+            plow = product.strip().lower()
+            fam = hist[hist["product"].str.strip().str.lower() == plow]
             if customer and customer.strip():
                 fam_client = fam[fam["customer"].str.strip().str.lower() == customer.strip().lower()]
                 if len(fam_client):
@@ -1110,58 +1119,35 @@ with tab_quote:
             elif auto:
                 st.caption(t["client_never"].format(c=customer.strip()[:20], p=product[:24]))
 
-        # ============================================================
-        # 4) CÓDIGO: híbrido, ligado al producto (si hay), + resto
-        # ============================================================
+        # ---- CÓDIGO ----
         r2c1, r2c2 = st.columns(2)
         with r2c1:
-            # familia de códigos del producto elegido
-            family_codes = None
-            if product:
-                key_match = next((p for p in prod_to_codes if p.lower() == product.strip().lower()), None)
-                if key_match:
-                    family_codes = prod_to_codes[key_match]
-
             base_code = auto.get("code", b.get("code", ""))
             if code_options:
-                if family_codes:
-                    rest_c = [c for c in code_options if c not in family_codes]
-                    ccopts = [NEW] + family_codes + ([sep(GRP_CAT)] + rest_c if rest_c else [])
-                else:
-                    ccopts = [NEW] + code_options
-                # valor inicial: base_code si aplica; si el producto tiene un solo código, ese
-                if "code_pick" not in st.session_state:
-                    if base_code and base_code in (family_codes or code_options):
-                        st.session_state.code_pick = base_code
-                    elif family_codes and len(family_codes) == 1:
-                        st.session_state.code_pick = family_codes[0]
-                elif st.session_state.code_pick not in ccopts:
-                    # el código elegido ya no aplica al nuevo producto -> resetear
+                if "code_pick" not in st.session_state and base_code and base_code in code_options:
+                    st.session_state.code_pick = base_code
+                elif "code_pick" in st.session_state and st.session_state.code_pick not in code_full:
                     st.session_state.code_pick = NEW
-                cpick_c = st.selectbox(t["code_pick"], ccopts, key="code_pick")
+                cpick_c = st.selectbox(t["code_pick"], code_full, key="code_pick")
                 if cpick_c == NEW:
                     code = st.text_input(t["code_new"], key="code_new",
                                          value=base_code if base_code and base_code not in code_options else "")
-                elif cpick_c.startswith("──"):
-                    code = ""
                 else:
                     code = cpick_c
             else:
                 code = st.text_input(t["code"], value=base_code)
 
         code = normalize_code(code)
-        if code and family_codes and product:
-            st.caption(t["code_family"].format(n=len(family_codes), p=product[:24]))
-
         uom = r2c2.text_input(t["uom"], value=auto.get("uom", b.get("uom", "kg")))
 
-        # Limpiar base_row tras consumirla (una sola vez), para no re-forzar valores
+        # Limpiar base_row tras consumirla (una sola vez)
         if st.session_state.get("_preload"):
             st.session_state._preload = False
 
-        # Producto en foco para analítica contextual
+        # Producto y código en foco para analítica contextual
         if product and product.strip():
             st.session_state.active_product = product.strip()
+        st.session_state.active_code = code.strip() if code and code.strip() else ""
 
         st.markdown("---")
         m1, m2, m3 = st.columns(3)
@@ -1432,19 +1418,54 @@ with tab_insights:
 
         st.caption(source_label)
 
-        if not len(data) or data["value"].dropna().empty:
+        # tras filtrar ceros, ¿queda algo?
+        _has_data = len(data) and not data["value"].dropna().empty
+        _dd_check = data.dropna(subset=["value"]).copy() if _has_data else pd.DataFrame()
+        if _has_data:
+            _dd_check = _dd_check[_dd_check["value"] > 0]
+        if not _has_data or not len(_dd_check):
             st.info(t["ins_no_prod_data"].format(p=active))
         else:
-            vals = data["value"].dropna()
+            dd = data.dropna(subset=["value"]).copy()
+            dd["date"] = dd["date"].astype(str).str.strip()
+            # Filtrar registros incompletos (precio 0 o negativo) de las estadísticas
+            dd = dd[dd["value"] > 0]
+            vals = dd["value"]
+
+            # Fechas del mínimo, máximo y última (para mostrar CUÁNDO fue cada precio)
+            def date_of(row):
+                d = str(row.get("date", "")).strip()
+                return t["ins_on_date"].format(d=d) if d else None
+            idx_min = dd["value"].idxmin()
+            idx_max = dd["value"].idxmax()
+            date_min = date_of(dd.loc[idx_min])
+            date_max = date_of(dd.loc[idx_max])
+
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric(t["ins_prod_min"], f"${fmt(vals.min())}")
+            m1.metric(t["ins_prod_min"], f"${fmt(vals.min())}", delta=date_min, delta_color="off")
             m2.metric(t["ins_prod_avg"], f"${fmt(vals.mean())}")
-            m3.metric(t["ins_prod_max"], f"${fmt(vals.max())}")
-            data_dated = data[data["date"].astype(str).str.strip() != ""].copy()
+            m3.metric(t["ins_prod_max"], f"${fmt(vals.max())}", delta=date_max, delta_color="off")
+            data_dated = dd[dd["date"].astype(str).str.strip() != ""].copy()
             if len(data_dated):
                 data_dated = data_dated.sort_values("date")
-                m4.metric(t["ins_prod_last"], f"${fmt(data_dated.iloc[-1]['value'])}")
+                last_row = data_dated.iloc[-1]
+                m4.metric(t["ins_prod_last"], f"${fmt(last_row['value'])}",
+                          delta=t["ins_on_date"].format(d=str(last_row["date"]).strip()),
+                          delta_color="off")
             m5.metric(t["ins_prod_count"], f"{len(vals)}")
+
+            # --- Tabla de detalle: cada precio de referencia CON su fecha ---
+            st.markdown(f"###### {t['ins_detail_header']}")
+            det_cols = ["date", "customer", "code", "value"]
+            det = dd[[c for c in det_cols if c in dd.columns]].copy()
+            det = det.sort_values("date", ascending=False)
+            rename_map = {"date": t["ins_col_date"], "customer": t["ins_col_customer"],
+                          "code": t["ins_col_code"], "value": t["ins_col_price"]}
+            det = det.rename(columns=rename_map)
+            if t["ins_col_price"] in det.columns:
+                det[t["ins_col_price"]] = det[t["ins_col_price"]].apply(lambda v: f"${fmt(v)}")
+            st.dataframe(det, use_container_width=True, hide_index=True,
+                         height=min(400, 60 + 35 * min(len(det), 10)))
 
             # Precio en el tiempo
             if len(data_dated):
@@ -1456,9 +1477,9 @@ with tab_insights:
                     st.line_chart(ts)
 
             # Por cliente (precio promedio para este producto)
-            if "customer" in data.columns and (data["customer"].astype(str).str.strip() != "").any():
+            if "customer" in dd.columns and (dd["customer"].astype(str).str.strip() != "").any():
                 st.markdown(f"###### {t['ins_by_client_prod']}")
-                by_c = (data[data["customer"].astype(str).str.strip() != ""]
+                by_c = (dd[dd["customer"].astype(str).str.strip() != ""]
                         .groupby("customer")["value"].mean().sort_values(ascending=False).head(15))
                 st.bar_chart(by_c)
 
