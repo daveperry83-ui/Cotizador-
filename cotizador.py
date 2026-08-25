@@ -891,7 +891,14 @@ with tab_search:
                             "forex": float(row["forex"]) if pd.notna(row["forex"]) else 1.37,
                         }
                         st.session_state.active_product = row["product"]
+                        # Fijar directamente los selectbox del formulario (así los encabezados se llenan)
+                        # Se limpian las keys de widget para que el formulario las regenere desde base_row.
+                        for k in ("cust_pick", "prod_pick", "code_pick",
+                                  "cust_new", "prod_new", "code_new", "final_price_input"):
+                            st.session_state.pop(k, None)
+                        st.session_state._preload = True
                         st.success(t["preloaded_ok"].format(p=row["product"]))
+                        st.rerun()
 
 # ============================================================================
 # TAB 2 — Nueva cotización
@@ -903,110 +910,134 @@ with tab_quote:
     with left:
         st.subheader(t["form_header"])
 
-        # Construir el mapa producto <-> códigos desde el histórico (case-insensitive).
-        # Cada producto (por su nombre "canónico" tal como aparece más reciente) tiene
-        # su familia de códigos; y cada código apunta a su producto.
-        prod_options = []
-        code_options = []
-        prod_to_codes = {}      # nombre_producto -> [códigos de esa familia]
-        code_to_prod = {}       # código -> nombre_producto
-        prod_canonical = {}     # lower(nombre) -> nombre canónico (última grafía usada)
+        # ============================================================
+        # Mapas de relación desde el histórico (case-insensitive)
+        # ============================================================
+        prod_options, code_options, cust_options = [], [], []
+        prod_to_codes = {}       # producto -> [códigos]
+        code_to_prods = {}       # código   -> [productos]
+        code_to_custs = {}       # código   -> [clientes]
+        cust_to_prods = {}       # cliente  -> [productos]
+        prod_canonical = {}      # lower(nombre) -> nombre canónico
 
         if hist is not None and len(hist):
-            h2 = hist.copy()
-            h2 = h2[h2["product"].astype(str).str.strip() != ""]
-            # nombre canónico = la grafía más reciente de cada producto (case-insensitive)
-            h2_sorted = h2.sort_values("date")
-            for _, row in h2_sorted.iterrows():
-                pl = str(row["product"]).strip().lower()
-                prod_canonical[pl] = str(row["product"]).strip()  # se queda con la última
+            h2 = hist[hist["product"].astype(str).str.strip() != ""].copy()
+            for _, row in h2.sort_values("date").iterrows():
+                prod_canonical[str(row["product"]).strip().lower()] = str(row["product"]).strip()
             prod_options = sorted(prod_canonical.values(), key=lambda x: x.lower())
-
-            # familias de códigos por producto (case-insensitive en el nombre)
+            cust_options = sorted({str(c).strip() for c in hist["customer"] if str(c).strip()},
+                                  key=lambda x: x.lower())
             for _, row in h2.iterrows():
-                pl = str(row["product"]).strip().lower()
-                canon = prod_canonical.get(pl, str(row["product"]).strip())
+                canon = prod_canonical.get(str(row["product"]).strip().lower(), str(row["product"]).strip())
                 cd = str(row["code"]).strip()
+                cu = str(row["customer"]).strip()
                 if cd:
                     prod_to_codes.setdefault(canon, [])
                     if cd not in prod_to_codes[canon]:
                         prod_to_codes[canon].append(cd)
-                    # código -> producto (si un código se repartiera entre productos, gana el más reciente)
-                    code_to_prod[cd] = canon
-            code_options = sorted(code_to_prod.keys(), key=lambda x: x.lower())
+                    code_to_prods.setdefault(cd, [])
+                    if canon not in code_to_prods[cd]:
+                        code_to_prods[cd].append(canon)
+                    if cu:
+                        code_to_custs.setdefault(cd, [])
+                        if cu not in code_to_custs[cd]:
+                            code_to_custs[cd].append(cu)
+                if cu:
+                    cust_to_prods.setdefault(cu, [])
+                    if canon not in cust_to_prods[cu]:
+                        cust_to_prods[cu].append(canon)
+            code_options = sorted(code_to_prods.keys(), key=lambda x: x.lower())
 
         NEW = t["write_new"]
+        GRP_CAT = t["grp_catalog"]
+        b = st.session_state.base_row
 
-        # --- Cliente: desplegable híbrido ---
-        cust_options = []
-        if hist is not None and len(hist):
-            cust_options = sorted([c for c in hist["customer"].dropna().unique() if str(c).strip()],
-                                  key=lambda x: x.lower())
+        def sep(label):
+            """Devuelve un separador visual no seleccionable."""
+            return "── " + label + " ──"
 
+        # ============================================================
+        # 1) CÓDIGO primero (permite el flujo código -> producto/cliente)
+        #    Lo leemos ANTES para poder filtrar cliente y producto por él.
+        # ============================================================
+        # El código elegido en la corrida previa (si lo hay)
+        chosen_code = st.session_state.get("code_pick", None)
+        if chosen_code in (NEW, None) or (chosen_code and chosen_code.startswith("──")):
+            chosen_code = None
+
+        # ============================================================
+        # 2) CLIENTE: híbrido, filtrado por código si hay uno elegido
+        # ============================================================
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             if cust_options:
+                if chosen_code and chosen_code in code_to_custs:
+                    # solo clientes que han cotizado ese código, + resto
+                    linked = sorted(code_to_custs[chosen_code], key=lambda x: x.lower())
+                    rest = [c for c in cust_options if c not in linked]
+                    copts = [NEW] + linked + ([sep(GRP_CAT)] + rest if rest else [])
+                else:
+                    copts = [NEW] + cust_options
+                # valor inicial desde base_row (precarga)
                 base_cust = b.get("customer", "")
-                copts = [NEW] + cust_options
-                cidx = copts.index(base_cust) if base_cust in cust_options else 0
-                cpick = st.selectbox(t["customer_pick"], copts, index=cidx, key="cust_pick")
+                if "cust_pick" not in st.session_state and base_cust in cust_options:
+                    st.session_state.cust_pick = base_cust
+                elif "cust_pick" in st.session_state and st.session_state.cust_pick not in copts:
+                    st.session_state.cust_pick = NEW
+                cpick = st.selectbox(t["customer_pick"], copts, key="cust_pick")
                 if cpick == NEW:
-                    customer = st.text_input(t["customer_new"],
-                                             value=base_cust if base_cust not in cust_options else "",
-                                             key="cust_new")
+                    customer = st.text_input(t["customer_new"], key="cust_new",
+                                             value=base_cust if base_cust and base_cust not in cust_options else "")
+                elif cpick.startswith("──"):
+                    customer = ""
                 else:
                     customer = cpick
             else:
                 customer = st.text_input(t["customer"], value=b.get("customer", ""))
 
-        # --- Producto: desplegable híbrido, AGRUPADO por cliente ---
-        # Si hay un cliente elegido, sus productos aparecen primero (bajo un separador),
-        # y debajo el resto del catálogo. Los separadores no son seleccionables.
-        prev_code_choice = st.session_state.get("code_pick", None)
-        prod_from_code = code_to_prod.get(prev_code_choice) if prev_code_choice and prev_code_choice != NEW else None
-
-        # Productos que este cliente ya compró (case-insensitive)
-        client_prods = []
-        if hist is not None and len(hist) and customer and customer.strip():
-            cmask = hist["customer"].str.strip().str.lower() == customer.strip().lower()
-            client_prods = sorted(
-                {prod_canonical.get(str(p).strip().lower(), str(p).strip())
-                 for p in hist[cmask]["product"] if str(p).strip()},
-                key=lambda x: x.lower())
-
-        GRP_C = t["grp_client"].format(c=customer.strip()[:24]) if customer.strip() else ""
-        GRP_CAT = t["grp_catalog"]
-
+        # ============================================================
+        # 3) PRODUCTO: híbrido. Prioridad de filtrado:
+        #    a) si hay código elegido -> productos de ese código
+        #    b) elif hay cliente -> productos del cliente + resto
+        #    c) else -> catálogo completo
+        # ============================================================
         with r1c2:
             if prod_options:
-                if client_prods:
-                    rest = [p for p in prod_options if p not in client_prods]
-                    opts = [NEW, GRP_C] + client_prods + [GRP_CAT] + rest
+                if chosen_code and chosen_code in code_to_prods:
+                    linked_p = sorted(code_to_prods[chosen_code], key=lambda x: x.lower())
+                    rest_p = [p for p in prod_options if p not in linked_p]
+                    popts = [NEW] + linked_p + ([sep(GRP_CAT)] + rest_p if rest_p else [])
+                elif customer and customer.strip() and customer in cust_to_prods:
+                    cprods = sorted(cust_to_prods[customer], key=lambda x: x.lower())
+                    rest_p = [p for p in prod_options if p not in cprods]
+                    popts = [NEW] + [sep(t["grp_client"].format(c=customer.strip()[:20]))] + cprods \
+                            + ([sep(GRP_CAT)] + rest_p if rest_p else [])
                 else:
-                    opts = [NEW] + prod_options
+                    popts = [NEW] + prod_options
 
-                base_prod = prod_from_code or b.get("product", "")
-                idx = opts.index(base_prod) if base_prod in opts else 0
-                pick = st.selectbox(t["product_pick"], opts, index=idx,
-                                    key="prod_pick", help=t["autofill_hint"])
-                if pick in (GRP_C, GRP_CAT):
-                    product = ""   # separador: no es selección válida
-                elif pick == NEW:
-                    product = st.text_input(t["product_new"],
-                                            value=base_prod if base_prod not in prod_options else "",
-                                            key="prod_new")
+                base_prod = b.get("product", "")
+                if "prod_pick" not in st.session_state and base_prod in prod_options:
+                    st.session_state.prod_pick = base_prod
+                elif "prod_pick" in st.session_state and st.session_state.prod_pick not in popts:
+                    st.session_state.prod_pick = NEW
+                pick = st.selectbox(t["product_pick"], popts, key="prod_pick", help=t["autofill_hint"])
+                if pick == NEW:
+                    product = st.text_input(t["product_new"], key="prod_new",
+                                            value=base_prod if base_prod and base_prod not in prod_options else "")
+                elif pick.startswith("──"):
+                    product = ""
                 else:
                     product = pick
             else:
                 product = st.text_input(t["product"], value=b.get("product", ""))
 
-        # Autocompletar base: PRIORIDAD a la última cotización de ESTE cliente para el producto;
-        # si el cliente nunca lo compró, cae a la base general del producto.
+        # ============================================================
+        # Autocompletar base (prioriza última cotización del cliente)
+        # ============================================================
         auto = {}
         client_last = None
         if hist is not None and len(hist) and product:
-            prod_mask = hist["product"].str.strip().str.lower() == product.strip().lower()
-            fam = hist[prod_mask]
+            fam = hist[hist["product"].str.strip().str.lower() == product.strip().lower()]
             if customer and customer.strip():
                 fam_client = fam[fam["customer"].str.strip().str.lower() == customer.strip().lower()]
                 if len(fam_client):
@@ -1025,8 +1056,6 @@ with tab_quote:
                     "forex": float(last["forex"]) if pd.notna(last["forex"]) else 1.37,
                     "uom": str(last["uom"]) if str(last["uom"]).strip() else "kg",
                 }
-
-        # Aviso de qué base se está usando (la del cliente, o la general)
         if product and customer and customer.strip():
             if client_last is not None:
                 st.caption(t["client_last_price"].format(
@@ -1034,42 +1063,56 @@ with tab_quote:
             elif auto:
                 st.caption(t["client_never"].format(c=customer.strip()[:20], p=product[:24]))
 
+        # ============================================================
+        # 4) CÓDIGO: híbrido, ligado al producto (si hay), + resto
+        # ============================================================
         r2c1, r2c2 = st.columns(2)
-
-        # --- Código: desplegable híbrido LIGADO al producto ---
-        # Si hay producto elegido, la lista de códigos se limita a su familia.
         with r2c1:
-            if product and product in prod_to_codes:
-                family_codes = prod_to_codes[product]
-            elif product and product.strip().lower() in {p.lower() for p in prod_to_codes}:
-                # match case-insensitive
-                key = next(p for p in prod_to_codes if p.lower() == product.strip().lower())
-                family_codes = prod_to_codes[key]
-            else:
-                family_codes = code_options  # sin producto: todos
+            # familia de códigos del producto elegido
+            family_codes = None
+            if product:
+                key_match = next((p for p in prod_to_codes if p.lower() == product.strip().lower()), None)
+                if key_match:
+                    family_codes = prod_to_codes[key_match]
 
-            default_code = auto.get("code", b.get("code", ""))
-            if family_codes:
-                opts_c = [NEW] + family_codes
-                idx_c = opts_c.index(default_code) if default_code in family_codes else (1 if len(family_codes) == 1 else 0)
-                pick_c = st.selectbox(t["code_pick"], opts_c, index=idx_c, key="code_pick")
-                if pick_c == NEW:
-                    code = st.text_input(t["code_new"],
-                                         value=default_code if default_code not in family_codes else "",
-                                         key="code_new")
+            base_code = auto.get("code", b.get("code", ""))
+            if code_options:
+                if family_codes:
+                    rest_c = [c for c in code_options if c not in family_codes]
+                    ccopts = [NEW] + family_codes + ([sep(GRP_CAT)] + rest_c if rest_c else [])
                 else:
-                    code = pick_c
+                    ccopts = [NEW] + code_options
+                # valor inicial: base_code si aplica; si el producto tiene un solo código, ese
+                if "code_pick" not in st.session_state:
+                    if base_code and base_code in (family_codes or code_options):
+                        st.session_state.code_pick = base_code
+                    elif family_codes and len(family_codes) == 1:
+                        st.session_state.code_pick = family_codes[0]
+                elif st.session_state.code_pick not in ccopts:
+                    # el código elegido ya no aplica al nuevo producto -> resetear
+                    st.session_state.code_pick = NEW
+                cpick_c = st.selectbox(t["code_pick"], ccopts, key="code_pick")
+                if cpick_c == NEW:
+                    code = st.text_input(t["code_new"], key="code_new",
+                                         value=base_code if base_code and base_code not in code_options else "")
+                elif cpick_c.startswith("──"):
+                    code = ""
+                else:
+                    code = cpick_c
             else:
-                code = st.text_input(t["code"], value=default_code)
+                code = st.text_input(t["code"], value=base_code)
 
-        # Normalizar el código a NR/ENR para mostrar y guardar
         code = normalize_code(code)
         if code and family_codes and product:
-            st.caption(t["code_family"].format(n=len([c for c in family_codes]), p=product))
+            st.caption(t["code_family"].format(n=len(family_codes), p=product[:24]))
 
         uom = r2c2.text_input(t["uom"], value=auto.get("uom", b.get("uom", "kg")))
 
-        # Registrar el producto en foco para la analítica contextual
+        # Limpiar base_row tras consumirla (una sola vez), para no re-forzar valores
+        if st.session_state.get("_preload"):
+            st.session_state._preload = False
+
+        # Producto en foco para analítica contextual
         if product and product.strip():
             st.session_state.active_product = product.strip()
 
