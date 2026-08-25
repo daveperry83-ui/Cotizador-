@@ -85,6 +85,10 @@ T = {
         "load_none": "Sin histórico cargado — la búsqueda y las referencias están inactivas. Puedes cotizar igual, pero sin comparación histórica.",
         "loaded_ok": "Histórico cargado: {n} registros ({start} → {end})",
         "load_error": "No se pudo leer el archivo: {err}",
+        "detect_ok": "✓ Columnas reconocidas: {cols}",
+        "detect_missing_essential": "⚠️ Faltan columnas esenciales: {cols}. El archivo puede no funcionar bien. Usa la plantilla.",
+        "detect_missing_important": "ℹ️ No se detectaron: {cols}. Se rellenan por defecto; revisa si tu archivo las tenía con otro nombre.",
+        "template_hint": "¿Formato distinto? Descarga la plantilla (abajo) y vacía tus datos ahí.",
         "session_privacy": "🔒 Local: la app corre en tu equipo. El archivo vive en tu OneDrive; nada se envía a servidores externos.",
         "clear_data": "Borrar histórico de la sesión",
         "tab_search": "🔎 Buscar historial",
@@ -217,6 +221,10 @@ T = {
         "load_none": "No history loaded — search and references are inactive. You can still quote, without historical comparison.",
         "loaded_ok": "History loaded: {n} records ({start} → {end})",
         "load_error": "Could not read file: {err}",
+        "detect_ok": "✓ Recognized columns: {cols}",
+        "detect_missing_essential": "⚠️ Missing essential columns: {cols}. The file may not work well. Use the template.",
+        "detect_missing_important": "ℹ️ Not detected: {cols}. Filled with defaults; check if your file named them differently.",
+        "template_hint": "Different format? Download the template (below) and paste your data there.",
         "session_privacy": "🔒 Local: the app runs on your machine. The file lives in your OneDrive; nothing is sent to external servers.",
         "clear_data": "Clear session history",
         "tab_search": "🔎 Search history",
@@ -356,7 +364,7 @@ def normalize_code(code):
     if code is None:
         return ""
     c = str(code).strip()
-    if not c:
+    if not c or c.lower() in ("nan", "total", "subtotal", "none", "n/a"):
         return ""
     up = c.upper()
     if up.startswith("ENR"):
@@ -376,28 +384,74 @@ def calc_quote(matl, ovrhd, gm, comm, duty, forex):
     return (matl + ovrhd) / (1 - gm) / (1 - comm) / (1 - duty) / fx
 
 
-def normalize_code(code):
-    """Normaliza códigos a NR/ENR. Números puros -> NR<num>. 'enr'/'nr' -> mayúscula.
-    Códigos raros no numéricos (X, ????, 08xxx, t1062...) se dejan intactos."""
-    import re as _re
-    if code is None:
-        return ""
-    s = str(code).strip()
-    if not s:
-        return ""
-    up = s.upper()
-    if up.startswith("ENR"):
-        return "ENR" + s[3:]
-    if up.startswith("NR"):
-        return "NR" + s[2:]
-    if _re.fullmatch(r"\d+", s):
-        return "NR" + s
-    return s
+COLUMN_SYNONYMS = {
+    # canónico -> lista de posibles nombres (en minúscula) que la app reconocerá
+    "date":     ["date", "fecha", "quote date", "fecha cotizacion", "fecha cotización", "día", "dia"],
+    "customer": ["customer", "cliente", "client", "account", "cuenta", "empresa", "razon social", "razón social"],
+    "broker":   ["broker", "corredor", "intermediario", "agente", "distribuidor"],
+    "product":  ["product", "producto", "item", "articulo", "artículo", "descripcion", "descripción",
+                 "description", "material", "nombre producto", "product name"],
+    "code":     ["code", "codigo", "código", "item code", "sku", "enr", "ref", "referencia",
+                 "cod", "clave", "part number", "product code"],
+    "matl":     ["matl", "material", "costo", "cost", "material cost", "costo material",
+                 "costo materia", "materia prima", "raw cost", "costo cad"],
+    "ovrhd":    ["ovrhd", "overhead", "gasto", "gastos", "indirecto", "indirectos", "oh"],
+    "gm":       ["gm", "gross margin", "margen", "margen bruto", "margin", "mrg", "% margen", "margen %"],
+    "comm":     ["comm", "commission", "comision", "comisión", "comm%", "% comision"],
+    "duty":     ["duty", "arancel", "aranceles", "tariff", "impuesto", "impuestos", "tax"],
+    "forex":    ["forex", "fx", "tipo de cambio", "tc", "exchange", "exchange rate", "cambio", "tasa cambio"],
+    "uom":      ["uom", "unidad", "unit", "unidad medida", "unidad de medida", "u/m", "medida"],
+    "quote":    ["quote", "cotizacion", "cotización", "precio", "price", "precio venta",
+                 "precio cotizado", "quoted price", "pvp", "precio final", "sell price"],
+    "comment":  ["comment", "comentario", "comentarios", "nota", "notas", "observacion",
+                 "observación", "observaciones", "remarks", "note"],
+}
+
+
+def remap_columns(df):
+    """Traduce los nombres de columna de un archivo ajeno a los canónicos de la app,
+    buscando sinónimos en español/inglés. Devuelve (df_renombrado, columnas_detectadas).
+    - Coincidencia exacta primero; luego coincidencia parcial (el sinónimo contenido en el encabezado).
+    - No pisa una columna canónica ya asignada.
+    """
+    df = df.copy()
+    lower_cols = {c: str(c).strip().lower() for c in df.columns}
+    rename = {}
+    used_targets = set()
+
+    # 1) coincidencia exacta
+    for canon, syns in COLUMN_SYNONYMS.items():
+        if canon in used_targets:
+            continue
+        for orig, low in lower_cols.items():
+            if low in syns and orig not in rename:
+                rename[orig] = canon
+                used_targets.add(canon)
+                break
+    # 2) coincidencia parcial (sinónimo contenido en el encabezado), sin repetir destino
+    for canon, syns in COLUMN_SYNONYMS.items():
+        if canon in used_targets:
+            continue
+        for orig, low in lower_cols.items():
+            if orig in rename:
+                continue
+            if any(s in low for s in syns if len(s) >= 3):
+                rename[orig] = canon
+                used_targets.add(canon)
+                break
+
+    df = df.rename(columns=rename)
+    return df, sorted(used_targets)
 
 
 def normalize_history(df):
-    """Ajusta un dataframe cargado al esquema esperado, tolerante a columnas faltantes."""
+    """Ajusta un dataframe cargado al esquema esperado, tolerante a columnas faltantes.
+    Primero intenta mapear nombres de columna ajenos (ES/EN) a los canónicos.
+    """
     df = df.copy()
+    # Paso 1: intento de mapeo flexible ANTES de bajar a minúsculas crudas
+    df, _detected = remap_columns(df)
+    # Paso 2: normalización estándar
     df.columns = [str(c).strip().lower() for c in df.columns]
     for c in COLS:
         if c not in df.columns:
@@ -412,29 +466,113 @@ def normalize_history(df):
     return df
 
 
-def load_uploaded(file):
+def analyze_upload(df):
+    """Inspecciona un archivo recién subido y reporta qué columnas se reconocieron
+    y cuáles faltan de las esenciales. Para dar feedback claro al usuario."""
+    _, detected = remap_columns(df)
+    essential = ["product", "quote"]      # mínimo para que el histórico sea útil
+    important = ["customer", "code", "matl", "gm", "forex", "date"]
+    missing_essential = [c for c in essential if c not in detected]
+    missing_important = [c for c in important if c not in detected]
+    return detected, missing_essential, missing_important
+
+
+def load_uploaded(file, return_diagnostics=False):
     name = file.name.lower()
     if name.endswith(".csv"):
-        df = pd.read_csv(file)
+        df_raw = pd.read_csv(file)
     elif name.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(file)
+        df_raw = pd.read_excel(file)
     else:
         raise ValueError("Formato no soportado (usa CSV o Excel).")
-    return normalize_history(df)
+    diag = analyze_upload(df_raw)
+    result = normalize_history(df_raw)
+    if return_diagnostics:
+        return result, diag
+    return result
+
+
+def _clean_sales_product(raw_name):
+    """'ANISE OLEORESIN NR0102 [NR0102]' -> 'Anise Oleoresin'."""
+    s = str(raw_name).strip()
+    s = re.sub(r"\s*\[[^\]]*\]\s*$", "", s)                    # quitar [NR0102]
+    s = re.sub(r"\s+(E?N?R)?\d+\s*$", "", s, flags=re.I)       # quitar código final
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.title()
+
+
+def _read_sales_r12(raw):
+    """Desarma un reporte pivote tipo R12: doble encabezado (año + métrica),
+    bloques de métricas repetidos por año, filas de identificación en col 0-7.
+    Devuelve filas producto-año con precio real de venta.
+    """
+    year_row = raw.iloc[0]
+    year_starts = {}
+    for col in range(8, raw.shape[1]):
+        v = year_row[col]
+        if pd.notna(v):
+            s = str(v).split(".")[0]
+            if re.match(r"^20\d\d$", s):
+                year_starts[int(s)] = col
+    if not year_starts:
+        return None
+
+    ID = {"customer": 3, "product": 5, "item_code": 7}
+    OFF_PRICE, OFF_QTY = 50, 34  # offsets dentro del bloque de cada año
+    data = raw.iloc[2:].reset_index(drop=True)
+    recs = []
+    for year, start in year_starts.items():
+        pc, qc = start + OFF_PRICE, start + OFF_QTY
+        for _, r in data.iterrows():
+            code = normalize_code(r[ID["item_code"]])
+            if not code:                     # sólo filas con código real (evita totales/duplicados)
+                continue
+            prod = r[ID["product"]]
+            if pd.isna(prod) or not str(prod).strip():
+                continue
+            price = r[pc] if pc < len(r) else None
+            if not (pd.notna(price) and isinstance(price, (int, float)) and price > 0):
+                continue
+            qty = r[qc] if qc < len(r) else None
+            cust = r[ID["customer"]]
+            cust = re.sub(r"\s*\[[^\]]*\]\s*$", "", str(cust)).strip() if pd.notna(cust) else ""
+            recs.append({
+                "product": _clean_sales_product(prod), "code": code,
+                "price": round(float(price), 2),
+                "date": str(year), "customer": cust.title(),
+                "qty": round(float(qty), 2) if pd.notna(qty) else pd.NA,
+            })
+    if not recs:
+        return None
+    return pd.DataFrame(recs)
 
 
 def load_sales(file):
-    """Lee un archivo de ventas reales y lo normaliza a columnas: product, code, price, date, customer, qty.
-    Es flexible: detecta los nombres de columna más comunes (ES/EN) por coincidencia.
-    Requisito mínimo: alguna columna de producto o código, y alguna de precio.
+    """Lee un archivo de ventas reales. Detecta automáticamente:
+    (a) formato pivote R12 (doble encabezado por año), o
+    (b) formato simple (una fila por venta, columnas nombradas).
+    Normaliza a: product, code, price, date, customer, qty.
     """
     name = file.name.lower()
     if name.endswith(".csv"):
         df = pd.read_csv(file)
     elif name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(file, header=None)
+        # ¿Es el formato pivote R12? La fila 0 suele traer 'R12' o años en col 8+
+        first = str(df.iloc[0, 0]).strip().upper() if len(df) else ""
+        has_years = any(re.match(r"^20\d\d", str(v).split(".")[0])
+                        for v in (df.iloc[0, 8:] if df.shape[1] > 8 else []))
+        if first == "R12" or has_years:
+            out = _read_sales_r12(df)
+            if out is not None and len(out):
+                return out
+        # Si no era pivote, releer con encabezado normal
+        file.seek(0)
         df = pd.read_excel(file)
     else:
         raise ValueError("Formato no soportado (usa CSV o Excel).")
+
+    # --- Formato simple ---
     df.columns = [str(c).strip().lower() for c in df.columns]
 
     def find(cands):
@@ -445,12 +583,12 @@ def load_sales(file):
         return None
 
     col_prod = find(["product", "producto", "item", "descripcion", "description", "material"])
-    col_code = find(["code", "codigo", "código", "sku", "enr", "ref", "articulo", "artículo"])
-    col_price = find(["price", "precio", "sale", "venta", "unit price", "precio unitario",
-                      "precio venta", "importe", "amount", "valor"])
-    col_date = find(["date", "fecha", "invoice date", "fecha factura"])
+    col_code = find(["item code", "code", "codigo", "código", "sku", "enr", "ref"])
+    col_price = find(["price", "precio", "sale price", "venta", "unit price",
+                      "precio unitario", "importe", "amount", "valor"])
+    col_date = find(["date", "fecha", "year", "año", "invoice date"])
     col_cust = find(["customer", "cliente", "client", "account", "cuenta"])
-    col_qty = find(["qty", "quantity", "cantidad", "volumen", "volume", "kg", "units"])
+    col_qty = find(["qty", "quantity", "cantidad", "volumen", "volume", "units"])
 
     if col_price is None or (col_prod is None and col_code is None):
         raise ValueError("El archivo de ventas necesita al menos una columna de precio y una de producto o código.")
@@ -607,8 +745,16 @@ with st.sidebar:
         )
         if uploaded is not None:
             try:
-                st.session_state.history = load_uploaded(uploaded)
+                st.session_state.history, diag = load_uploaded(uploaded, return_diagnostics=True)
                 st.session_state.local_path = ""  # subir no permite reescritura
+                detected, miss_ess, miss_imp = diag
+                if detected:
+                    st.caption(t["detect_ok"].format(cols=", ".join(detected)))
+                if miss_ess:
+                    st.warning(t["detect_missing_essential"].format(cols=", ".join(miss_ess)))
+                elif miss_imp:
+                    st.caption(t["detect_missing_important"].format(cols=", ".join(miss_imp)))
+                st.caption(t["template_hint"])
             except Exception as exc:  # noqa: BLE001
                 st.error(t["load_error"].format(err=exc))
 
@@ -1181,12 +1327,12 @@ with tab_insights:
         use_sales = sales is not None and len(sales) > 0
         # Filtrar los datos de ese producto en la fuente elegida
         if use_sales:
-            # match por producto (case-insensitive) o por código
-            sp = sales[sales["product"].str.strip().str.lower() == active.lower()]
-            if not len(sp):
-                # intentar por código: buscar códigos de ese producto en el histórico
-                prod_codes = set(hist[hist["product"].str.strip().str.lower() == active.lower()]["code"])
-                sp = sales[sales["code"].isin(prod_codes)]
+            # match por producto (case-insensitive) O por cualquier código de esa familia
+            prod_codes = set(hist[hist["product"].str.strip().str.lower() == active.lower()]["code"]) - {""}
+            sp = sales[
+                (sales["product"].str.strip().str.lower() == active.lower())
+                | (sales["code"].isin(prod_codes))
+            ]
             data = sp.rename(columns={"price": "value"})
             source_label = t["ins_source_sales"]
         else:
