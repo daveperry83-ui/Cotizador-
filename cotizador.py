@@ -195,6 +195,7 @@ T = {
         "sales_help": "Sube ventas reales (CSV/Excel). Si está presente, la analítica usa precios de venta reales en vez de cotizados.",
         "sales_prompt": "Sube archivo de ventas",
         "sales_ok": "Ventas cargadas: {n} registros",
+        "sales_processing": "Procesando archivo de ventas… (archivos grandes pueden tardar 20-30s la primera vez)",
         "sales_error": "No se pudo leer ventas: {err}",
         "sales_clear": "Quitar archivo de ventas",
         "footer": "Fórmula: (costo + overhead) / (1−GM) / (1−comisión) / (1−duty) / forex",
@@ -335,6 +336,7 @@ T = {
         "sales_help": "Upload real sales (CSV/Excel). If present, analytics uses real sale prices instead of quoted ones.",
         "sales_prompt": "Upload sales file",
         "sales_ok": "Sales loaded: {n} records",
+        "sales_processing": "Processing sales file… (large files can take 20-30s the first time)",
         "sales_error": "Could not read sales: {err}",
         "sales_clear": "Remove sales file",
         "footer": "Formula: (cost + overhead) / (1−GM) / (1−commission) / (1−duty) / forex",
@@ -669,10 +671,66 @@ def _read_sales_r12(raw):
     return pd.DataFrame(recs)
 
 
+def _read_sales_export(raw):
+    """Desarma un reporte jerárquico tipo 'Export' (Customer > Product > Item Code >
+    By Month > Product Family > Enterprise&Product), con subtotales 'Total' en cada
+    nivel y bloques de métricas repetidos por año en columnas (48 métricas c/u,
+    empezando en la columna 6). Toma solo el nivel cliente+producto+código con el
+    total anual (By Month == 'Total'), evitando duplicar meses y subniveles.
+    Vectorizado con pandas (sin iterrows) para que sea rápido con archivos grandes.
+    """
+    year_row = raw.iloc[0]
+    year_starts = {}
+    for col in range(6, raw.shape[1]):
+        v = year_row[col]
+        if pd.notna(v):
+            s = str(v).split(".")[0]
+            if re.match(r"^20\d\d$", s) and int(s) not in year_starts:
+                year_starts[int(s)] = col
+    if not year_starts:
+        return None
+
+    OFF_PRICE, OFF_QTY = 35, 19  # offsets dentro del bloque de cada año
+    data = raw.iloc[2:].reset_index(drop=True)
+
+    c0 = data[0].astype(str)
+    c1 = data[1].astype(str)
+    c2 = data[2]
+    c3 = data[3].astype(str)
+    mask = (c0 != " []") & (c0 != "Total") & (c1 != "Total") & c2.notna() & (c3 == "Total")
+    sub = data[mask].copy()
+    if not len(sub):
+        return None
+
+    codes = sub[2].apply(normalize_code)
+    prods = sub[1].apply(_clean_sales_product)
+    custs = sub[0].astype(str).apply(lambda s: re.sub(r"\s*\[[^\]]*\]\s*$", "", s).strip().title())
+
+    frames = []
+    for year, start in year_starts.items():
+        pc, qc = start + OFF_PRICE, start + OFF_QTY
+        if pc >= sub.shape[1]:
+            continue
+        price = pd.to_numeric(sub[pc], errors="coerce")
+        qty = pd.to_numeric(sub[qc], errors="coerce") if qc < sub.shape[1] else pd.Series(pd.NA, index=sub.index)
+        valid = price.notna() & (price > 0) & (codes != "")
+        if not valid.any():
+            continue
+        frames.append(pd.DataFrame({
+            "product": prods[valid].values, "code": codes[valid].values,
+            "price": price[valid].round(2).values, "date": str(year),
+            "customer": custs[valid].values, "qty": qty[valid].round(2).values,
+        }))
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
 def load_sales(file):
     """Lee un archivo de ventas reales. Detecta automáticamente:
-    (a) formato pivote R12 (doble encabezado por año), o
-    (b) formato simple (una fila por venta, columnas nombradas).
+    (a) formato pivote R12 (doble encabezado por año, IDs en col 3/5/7),
+    (b) formato jerárquico 'Export' (Customer/Product/Item Code/By Month en fila 1), o
+    (c) formato simple (una fila por venta, columnas nombradas).
     Normaliza a: product, code, price, date, customer, qty.
     """
     name = file.name.lower()
@@ -680,7 +738,14 @@ def load_sales(file):
         df = pd.read_csv(file)
     elif name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(file, header=None)
-        # ¿Es el formato pivote R12? La fila 0 suele traer 'R12' o años en col 8+
+        # ¿Formato 'Export' jerárquico? Firma: fila 1 trae estos 4 encabezados exactos.
+        row1 = [str(v).strip() for v in df.iloc[1, :4]] if len(df) > 1 and df.shape[1] > 3 else []
+        is_export = row1 == ["Customer", "Product", "Item Code", "By Month"]
+        if is_export:
+            out = _read_sales_export(df)
+            if out is not None and len(out):
+                return out
+        # ¿Formato pivote R12? La fila 0 suele traer 'R12' o años en col 8+
         first = str(df.iloc[0, 0]).strip().upper() if len(df) else ""
         has_years = any(re.match(r"^20\d\d", str(v).split(".")[0])
                         for v in (df.iloc[0, 8:] if df.shape[1] > 8 else []))
@@ -688,7 +753,7 @@ def load_sales(file):
             out = _read_sales_r12(df)
             if out is not None and len(out):
                 return out
-        # Si no era pivote, releer con encabezado normal
+        # Si no era ninguno de los dos, releer con encabezado normal
         file.seek(0)
         df = pd.read_excel(file)
     else:
@@ -940,7 +1005,8 @@ with st.sidebar:
         sales_sig = (sales_up.name, sales_up.size)
         if st.session_state.get("_sales_sig") != sales_sig:
             try:
-                st.session_state.sales = load_sales(sales_up)
+                with st.spinner(t["sales_processing"]):
+                    st.session_state.sales = load_sales(sales_up)
                 st.session_state._sales_sig = sales_sig
                 st.session_state._sales_msg = ("ok", len(st.session_state.sales))
             except Exception as exc:  # noqa: BLE001
@@ -1370,50 +1436,52 @@ with tab_batch:
         )
         st.caption("🔒 " + t["export_client_help"])
 
-        # ------------------------------------------------------------------
-        # Actualizar histórico (modo nube): descargar CSV/Excel completo
-        # con las cotizaciones de la sesión ya agregadas y deduplicadas.
-        # ------------------------------------------------------------------
-        st.markdown("---")
-        st.markdown(f"##### 🔄 {t['update_header']}")
-        st.caption(t["update_desc"])
+    # ------------------------------------------------------------------
+    # Actualizar histórico (modo nube): descargar CSV/Excel completo con las
+    # cotizaciones de la sesión ya agregadas y deduplicadas. SIEMPRE visible
+    # en esta pestaña (con o sin carrito), para poder bajar el histórico
+    # actualizado —o simplemente una copia limpia— en cualquier momento.
+    # ------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown(f"##### 🔄 {t['update_header']}")
+    st.caption(t["update_desc"])
 
-        if st.session_state.history is None or not len(st.session_state.history):
-            st.info(t["update_no_hist"])
-        else:
-            new_rows = cart_to_rows(st.session_state.cart)
-            combined, n_added = append_dedup(st.session_state.history, new_rows)
-            n_base = len(st.session_state.history)
-            n_dups = (len(new_rows) - n_added) if new_rows is not None else 0
+    if st.session_state.history is None or not len(st.session_state.history):
+        st.info(t["update_no_hist"])
+    else:
+        new_rows = cart_to_rows(st.session_state.cart)
+        combined, n_added = append_dedup(st.session_state.history, new_rows)
+        n_base = len(st.session_state.history)
+        n_dups = (len(new_rows) - n_added) if new_rows is not None else 0
 
-            summary = t["update_summary"].format(base=n_base, new=n_added, total=len(combined))
-            if n_dups:
-                summary += " " + t["update_dups_note"].format(d=n_dups)
-            st.markdown(f"<div style='color:{GOLD_HI};font-size:13px;margin-bottom:8px'>📊 {summary}</div>",
-                        unsafe_allow_html=True)
-            if not st.session_state.cart:
-                st.caption(t["update_no_cart"])
+        summary = t["update_summary"].format(base=n_base, new=n_added, total=len(combined))
+        if n_dups:
+            summary += " " + t["update_dups_note"].format(d=n_dups)
+        st.markdown(f"<div style='color:{GOLD_HI};font-size:13px;margin-bottom:8px'>📊 {summary}</div>",
+                    unsafe_allow_html=True)
+        if not st.session_state.cart:
+            st.caption(t["update_no_cart"])
 
-            u1, u2 = st.columns(2)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        u1, u2 = st.columns(2)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-            # CSV
-            csv_bytes = combined.to_csv(index=False).encode("utf-8-sig")
-            u1.download_button(
-                t["update_btn_csv"], data=csv_bytes,
-                file_name=f"historico_actualizado_{stamp}.csv",
-                mime="text/csv", use_container_width=True,
-            )
-            # Excel
-            buf_hist = io.BytesIO()
-            with pd.ExcelWriter(buf_hist, engine="openpyxl") as xw:
-                combined.to_excel(xw, sheet_name="Historico", index=False)
-            u2.download_button(
-                t["update_btn_xlsx"], data=buf_hist.getvalue(),
-                file_name=f"historico_actualizado_{stamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+        # CSV
+        csv_bytes = combined.to_csv(index=False).encode("utf-8-sig")
+        u1.download_button(
+            t["update_btn_csv"], data=csv_bytes,
+            file_name=f"historico_actualizado_{stamp}.csv",
+            mime="text/csv", use_container_width=True,
+        )
+        # Excel
+        buf_hist = io.BytesIO()
+        with pd.ExcelWriter(buf_hist, engine="openpyxl") as xw:
+            combined.to_excel(xw, sheet_name="Historico", index=False)
+        u2.download_button(
+            t["update_btn_xlsx"], data=buf_hist.getvalue(),
+            file_name=f"historico_actualizado_{stamp}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 # ============================================================================
 with tab_insights:
     sales = st.session_state.sales
