@@ -882,12 +882,31 @@ except NameError:
 TEMPLATE_PATH = os.path.join(_APP_DIR, "data", "plantilla_cotizacion.docx")
 
 
+QUOTE_DOC_LABELS = {
+    "es": dict(titulo="C O T I Z A C I Ó N", lbl_cliente="Cliente", lbl_referencia="Referencia",
+               lbl_fecha="Fecha", lbl_preparado="Preparado por", lbl_vigencia="Vigencia",
+               lbl_moneda="Moneda", lbl_detalle="D E T A L L E",
+               lbl_producto="PRODUCTO", lbl_codigo="CÓDIGO", lbl_precio="PRECIO",
+               lbl_nota="Nota:",
+               lbl_legal="Esta cotización es válida por el período indicado y está sujeta a "
+                         "confirmación de disponibilidad."),
+    "en": dict(titulo="Q U O T A T I O N", lbl_cliente="Client", lbl_referencia="Reference",
+               lbl_fecha="Date", lbl_preparado="Prepared by", lbl_vigencia="Validity",
+               lbl_moneda="Currency", lbl_detalle="D E T A I L",
+               lbl_producto="PRODUCT", lbl_codigo="CODE", lbl_precio="PRICE",
+               lbl_nota="Note:",
+               lbl_legal="This quotation is valid for the stated period and subject to "
+                         "availability confirmation."),
+}
+
+
 def build_client_quote_docx(cart_df, cliente, referencia, fecha, preparado_por,
-                             incoterm, vigencia, moneda, comentario=""):
+                             incoterm, vigencia, moneda, comentario="", lang="es"):
     """Genera la cotización para el cliente en Word (marca Robertet), a partir de la
     plantilla. Solo incluye producto/código/precio por ítem — SIN costos ni márgenes,
     igual que la versión Excel que reemplaza. Incoterm y vigencia son datos del
-    documento completo (no por ítem). Devuelve un BytesIO listo para descargar.
+    documento completo (no por ítem). El documento sale enteramente en un solo idioma
+    (es/en) según 'lang', sin mezclar ambos. Devuelve un BytesIO listo para descargar.
     """
     if not _HAS_DOCXTPL:
         raise RuntimeError(
@@ -901,6 +920,7 @@ def build_client_quote_docx(cart_df, cliente, referencia, fecha, preparado_por,
         "price": f"{moneda} {fmt(row['price_usd'])}",
     } for _, row in cart_df.iterrows()]
 
+    labels = QUOTE_DOC_LABELS.get(lang, QUOTE_DOC_LABELS["es"])
     tpl = DocxTemplate(TEMPLATE_PATH)
     tpl.render({
         "cliente": cliente or "—",
@@ -912,6 +932,7 @@ def build_client_quote_docx(cart_df, cliente, referencia, fecha, preparado_por,
         "moneda": moneda or "USD",
         "comentario": (comentario or "").strip(),
         "items": items,
+        **labels,
     })
     buf = io.BytesIO()
     tpl.save(buf)
@@ -1305,9 +1326,9 @@ with tab_quote:
         st.markdown("---")
         s1, s2, s3, s4 = st.columns(4)
         spec = s1.text_input(t["spec"], value="")
-        incoterm = s2.text_input(t["incoterm"], value="FCA")
+        incoterm = s2.text_input(t["incoterm"], value="FCA", key="item_incoterm")
         moq = s3.text_input(t["moq"], value="")
-        validity = s4.text_input(t["validity"], value="30 " + ("días" if st.session_state.lang == "es" else "days"))
+        validity = s4.text_input(t["validity"], value="30 " + ("días" if st.session_state.lang == "es" else "days"), key="item_validity")
         comment = st.text_input(t["comment"], value="")
 
     with right:
@@ -1448,8 +1469,8 @@ with tab_batch:
         cl_by = mc4.text_input(t["client_prepared"], value="Robertet")
 
         mc5, mc6 = st.columns(2)
-        cl_incoterm = mc5.text_input(t["incoterm"], value=cart[-1].get("incoterm", "FCA"))
-        cl_validity = mc6.text_input(t["validity"], value=cart[-1].get("validity", ""))
+        cl_incoterm = mc5.text_input(t["incoterm"], value=cart[-1].get("incoterm", "FCA"), key="doc_incoterm")
+        cl_validity = mc6.text_input(t["validity"], value=cart[-1].get("validity", ""), key="doc_validity")
 
         st.markdown("---")
         e1, e2 = st.columns(2)
@@ -1467,12 +1488,17 @@ with tab_batch:
 
         # Export cliente (Word, plantilla Robertet — reemplaza el Excel limpio)
         try:
-            fecha_doc = date.today().strftime(
-                "%d de %B de %Y" if st.session_state.lang == "es" else "%B %d, %Y")
+            if st.session_state.lang == "es":
+                meses_es = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+                            "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+                hoy = date.today()
+                fecha_doc = f"{hoy.day} de {meses_es[hoy.month - 1]} de {hoy.year}"
+            else:
+                fecha_doc = date.today().strftime("%B %d, %Y")
             buf_cli = build_client_quote_docx(
                 cart_df, cliente=cl_name, referencia=cl_ref, fecha=fecha_doc,
                 preparado_por=cl_by, incoterm=cl_incoterm, vigencia=cl_validity,
-                moneda=cl_curr,
+                moneda=cl_curr, lang=st.session_state.lang,
             )
             e2.download_button(
                 t["export_client"], data=buf_cli.getvalue(),
