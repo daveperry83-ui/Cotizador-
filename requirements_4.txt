@@ -1,0 +1,5 @@
+streamlit>=1.36
+pandas>=2.0
+openpyxl>=3.1
+docxtpl>=0.16
+python-docx>=1.1
