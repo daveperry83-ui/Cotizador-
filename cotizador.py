@@ -24,6 +24,11 @@ from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
+try:
+    from docxtpl import DocxTemplate
+    _HAS_DOCXTPL = True
+except ImportError:
+    _HAS_DOCXTPL = False
 
 # ----------------------------------------------------------------------------
 # Configuración de página
@@ -152,8 +157,9 @@ T = {
         "batch_count": "{n} ítems en la cotización",
         "remove": "Quitar",
         "export_internal": "⬇️ Exportar interno (con costos y márgenes)",
-        "export_client": "⬇️ Exportar para cliente (sin costos)",
-        "export_client_help": "Versión limpia: solo ítem, especificación, precio, moneda, incoterm, validez y MOQ. Sin costos ni márgenes.",
+        "export_client": "⬇️ Exportar cotización cliente (Word)",
+        "export_client_help": "Documento Word con membrete Robertet: solo producto, código y precio. Sin costos ni márgenes.",
+        "export_client_error": "No se pudo generar el Word: {err}",
         "update_header": "Actualizar histórico (modo nube)",
         "update_desc": "Descarga tu histórico completo con las cotizaciones de esta sesión ya agregadas. Reemplaza tu archivo con este y súbelo la próxima vez.",
         "update_btn_csv": "⬇️ Descargar histórico actualizado (CSV)",
@@ -295,8 +301,9 @@ T = {
         "batch_count": "{n} items in the quotation",
         "remove": "Remove",
         "export_internal": "⬇️ Export internal (with costs & margins)",
-        "export_client": "⬇️ Export for client (no costs)",
-        "export_client_help": "Clean version: only item, spec, price, currency, incoterm, validity, MOQ. No costs or margins.",
+        "export_client": "⬇️ Export client quotation (Word)",
+        "export_client_help": "Robertet-branded Word document: product, code and price only. No costs or margins.",
+        "export_client_error": "Could not generate the Word file: {err}",
         "update_header": "Update history (cloud mode)",
         "update_desc": "Download your full history with this session's quotes already appended. Replace your file with this one and upload it next time.",
         "update_btn_csv": "⬇️ Download updated history (CSV)",
@@ -868,6 +875,50 @@ def pct(v):
     return f"{float(v) * 100:.1f}".rstrip("0").rstrip(".") + "%"
 
 
+try:
+    _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _APP_DIR = os.getcwd()
+TEMPLATE_PATH = os.path.join(_APP_DIR, "data", "plantilla_cotizacion.docx")
+
+
+def build_client_quote_docx(cart_df, cliente, referencia, fecha, preparado_por,
+                             incoterm, vigencia, moneda, comentario=""):
+    """Genera la cotización para el cliente en Word (marca Robertet), a partir de la
+    plantilla. Solo incluye producto/código/precio por ítem — SIN costos ni márgenes,
+    igual que la versión Excel que reemplaza. Incoterm y vigencia son datos del
+    documento completo (no por ítem). Devuelve un BytesIO listo para descargar.
+    """
+    if not _HAS_DOCXTPL:
+        raise RuntimeError(
+            "Falta la librería docxtpl. Agrega 'docxtpl' a requirements.txt y reinstala.")
+    if not os.path.exists(TEMPLATE_PATH):
+        raise RuntimeError(f"No se encontró la plantilla en {TEMPLATE_PATH}.")
+
+    items = [{
+        "product": row["product"],
+        "code": row["code"],
+        "price": f"{moneda} {fmt(row['price_usd'])}",
+    } for _, row in cart_df.iterrows()]
+
+    tpl = DocxTemplate(TEMPLATE_PATH)
+    tpl.render({
+        "cliente": cliente or "—",
+        "referencia": referencia or "—",
+        "fecha": fecha,
+        "preparado_por": preparado_por or "—",
+        "incoterm": incoterm or "—",
+        "vigencia": vigencia or "—",
+        "moneda": moneda or "USD",
+        "comentario": (comentario or "").strip(),
+        "items": items,
+    })
+    buf = io.BytesIO()
+    tpl.save(buf)
+    buf.seek(0)
+    return buf
+
+
 # ----------------------------------------------------------------------------
 # Estado de sesión
 # ----------------------------------------------------------------------------
@@ -1396,16 +1447,14 @@ with tab_batch:
         cl_curr = mc3.text_input(t["client_currency"], value="USD")
         cl_by = mc4.text_input(t["client_prepared"], value="Robertet")
 
-        # Vista cliente (SIN costos ni márgenes — regla de la skill)
-        client_view = cart_df[["product", "spec", "price_usd", "uom",
-                               "incoterm", "moq", "validity"]].copy()
-        client_view.columns = ["Product/Producto", "Spec", f"Price ({cl_curr})",
-                               "UOM", "Incoterm", "MOQ", "Validity/Validez"]
+        mc5, mc6 = st.columns(2)
+        cl_incoterm = mc5.text_input(t["incoterm"], value=cart[-1].get("incoterm", "FCA"))
+        cl_validity = mc6.text_input(t["validity"], value=cart[-1].get("validity", ""))
 
         st.markdown("---")
         e1, e2 = st.columns(2)
 
-        # Export interno (Excel con costos)
+        # Export interno (Excel con costos) — SIN CAMBIOS, referencia interna
         buf_int = io.BytesIO()
         with pd.ExcelWriter(buf_int, engine="openpyxl") as xw:
             internal_view.to_excel(xw, sheet_name="Cotizacion_Interna", index=False)
@@ -1416,24 +1465,23 @@ with tab_batch:
             use_container_width=True,
         )
 
-        # Export cliente (Excel limpio con encabezado)
-        buf_cli = io.BytesIO()
-        with pd.ExcelWriter(buf_cli, engine="openpyxl") as xw:
-            header = pd.DataFrame({
-                "": [f"{'Cotización' if st.session_state.lang=='es' else 'Quotation'}: {cl_name}",
-                     f"{'Referencia' if st.session_state.lang=='es' else 'Reference'}: {cl_ref}",
-                     f"{'Fecha' if st.session_state.lang=='es' else 'Date'}: {date.today().isoformat()}",
-                     f"{'Preparado por' if st.session_state.lang=='es' else 'Prepared by'}: {cl_by}",
-                     ""]
-            })
-            header.to_excel(xw, sheet_name="Quotation", index=False, header=False)
-            client_view.to_excel(xw, sheet_name="Quotation", index=False, startrow=6)
-        e2.download_button(
-            t["export_client"], data=buf_cli.getvalue(),
-            file_name=f"cotizacion_cliente_{cl_name or 'cliente'}_{datetime.now():%Y%m%d}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help=t["export_client_help"], use_container_width=True,
-        )
+        # Export cliente (Word, plantilla Robertet — reemplaza el Excel limpio)
+        try:
+            fecha_doc = date.today().strftime(
+                "%d de %B de %Y" if st.session_state.lang == "es" else "%B %d, %Y")
+            buf_cli = build_client_quote_docx(
+                cart_df, cliente=cl_name, referencia=cl_ref, fecha=fecha_doc,
+                preparado_por=cl_by, incoterm=cl_incoterm, vigencia=cl_validity,
+                moneda=cl_curr,
+            )
+            e2.download_button(
+                t["export_client"], data=buf_cli.getvalue(),
+                file_name=f"cotizacion_{cl_name or 'cliente'}_{datetime.now():%Y%m%d}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                help=t["export_client_help"], use_container_width=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            e2.error(t["export_client_error"].format(err=exc))
         st.caption("🔒 " + t["export_client_help"])
 
     # ------------------------------------------------------------------
